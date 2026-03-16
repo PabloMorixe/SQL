@@ -1,0 +1,165 @@
+
+USE [SqlMant]
+GO
+
+/****** Object:  Table [dbo].[sessions_alert2]    Script Date: 16/3/2026 17:18:50 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[sessions_alert2](
+	[host_name] [nvarchar](128) NULL,
+	[program_name] [nvarchar](128) NULL,
+	[login_name] [nvarchar](128) NULL,
+	[DB] [varchar](100) NULL,
+	[num_sessions] [int] NULL,
+	[capture_time] [datetime] NULL
+) ON [PRIMARY]
+GO
+
+
+  CREATE NONCLUSTERED INDEX IX_sessions_alert2_capture_time 
+ON [SqlMant].[dbo].[sessions_alert2] ([capture_time] DESC);
+USE [msdb]
+GO
+
+/****** Object:  Job [DBA_Sessions_Monitoring2]    Script Date: 16/3/2026 18:56:45 ******/
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+/****** Object:  JobCategory [DBA]    Script Date: 16/3/2026 18:56:45 ******/
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'DBA' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'DBA'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'DBA_Sessions_Monitoring2', 
+		@enabled=1, 
+		@notify_level_eventlog=0, 
+		@notify_level_email=0, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'Inserts Session Details', 
+		@category_name=N'DBA', 
+		@owner_login_name=N'sa', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Log info]    Script Date: 16/3/2026 18:56:45 ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Log info', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=3, 
+		@on_success_step_id=0, 
+		@on_fail_action=3, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'/*INSERT INTO sqlmant.dbo.sessions_alert
+    ([host_name], [program_name], [login_name], [DB], [num_sessions], [capture_time])
+SELECT  
+    s.host_name,
+    s.program_name,
+    s.login_name,
+    DB_NAME(s.database_id) AS DB,
+    COUNT(c.session_id) AS num_sessions,
+    GETDATE() AS Time -- Registra la fecha y hora actuales
+FROM sys.dm_exec_connections c
+JOIN sys.dm_exec_sessions s ON c.session_id = s.session_id
+WHERE c.session_id > 50
+  AND s.database_id > 4
+  AND NOT EXISTS (
+      SELECT 1 
+      FROM sqlmant.dbo.sessions_alert sa
+      WHERE sa.host_name = s.host_name
+        AND sa.login_name = s.login_name
+        AND sa.DB = DB_NAME(s.database_id)
+  )
+GROUP BY s.host_name, s.program_name, s.login_name, DB_NAME(s.database_id)
+ORDER BY DB DESC;
+
+*/
+
+INSERT INTO sqlmant.dbo.sessions_alert2
+    ([host_name], [program_name], [login_name], [DB], [num_sessions], [capture_time])
+SELECT  
+    s.host_name,
+    s.program_name,
+    s.login_name,
+    DB_NAME(s.database_id) AS DB,
+    COUNT(c.session_id) AS num_sessions,
+    GETDATE() AS capture_time
+FROM sys.dm_exec_connections c
+JOIN sys.dm_exec_sessions s ON c.session_id = s.session_id
+WHERE c.session_id > 50
+  AND s.database_id > 4
+GROUP BY s.host_name, s.program_name, s.login_name, DB_NAME(s.database_id);', 
+		@database_name=N'master', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [purga]    Script Date: 16/3/2026 18:56:45 ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'purga', 
+		@step_id=2, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'-- Agregar esto como un segundo paso en tu Job
+DELETE FROM [SqlMant].[dbo].[sessions_alert2] 
+WHERE [capture_time] < DATEADD(day, -90, GETDATE());', 
+		@database_name=N'SqlMant', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'Session Monitoring', 
+		@enabled=1, 
+		@freq_type=4, 
+		@freq_interval=1, 
+		@freq_subday_type=4, 
+		@freq_subday_interval=2, 
+		@freq_relative_interval=0, 
+		@freq_recurrence_factor=0, 
+		@active_start_date=20221026, 
+		@active_end_date=99991231, 
+		@active_start_time=0, 
+		@active_end_time=235959, 
+		@schedule_uid=N'fd20d95a-d354-4499-8b7c-b50e47a08cbc'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+GO
+
+
+
+
+
+
+-- Ejecuta el job de forma inmediata
+EXEC msdb.dbo.sp_start_job N'DBA_Sessions_Monitoring2';
+GO
+
+
+/****** Script for SelectTopNRows command from SSMS  ******/
+SELECT TOP (1000) [host_name]
+      ,[program_name]
+      ,[login_name]
+      ,[DB]
+      ,[num_sessions]
+      ,[capture_time]
+  FROM [SqlMant].[dbo].[sessions_alert2] order by 6 desc
+
