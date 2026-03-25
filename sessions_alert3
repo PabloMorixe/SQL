@@ -1,0 +1,400 @@
+
+
+
+/* =======================================================================
+   ANALÍTICAS COMPLETAS SOBRE sessions_alert3
+   Autor: Pablo + Copilot
+   Objetivo: analizar carga, tendencias, consumo y anomalías de sesiones
+   ======================================================================= */
+
+
+/* ***********************************************************************
+   1) TENDENCIA DE SESIONES POR HOST / PROGRAMA / LOGIN
+   *********************************************************************** */
+-- Muestra cómo evolucionan las sesiones capturadas a lo largo del tiempo
+-- Útil para ver patrones de comportamiento por aplicación y usuario
+SELECT 
+    host_name,
+    program_name,
+    login_name,
+    capture_time,
+    num_sessions
+FROM SqlMant.dbo.sessions_alert3
+ORDER BY capture_time DESC;
+
+
+
+/* ***********************************************************************
+   2) SESIONES POR BASE DE DATOS
+   *********************************************************************** */
+-- Promedio, máximo, mínimo y cantidad de muestras por base
+-- Permite ver qué bases reciben más carga de sesiones
+SELECT 
+    DB,
+    AVG(num_sessions) AS promedio_sesiones,
+    MAX(num_sessions) AS max_sesiones,
+    MIN(num_sessions) AS min_sesiones,
+    COUNT(*) AS muestras
+FROM SqlMant.dbo.sessions_alert3
+GROUP BY DB
+ORDER BY promedio_sesiones DESC;
+
+
+
+/* ***********************************************************************
+   3) SESIONES POR HORA DEL DÍA
+   *********************************************************************** */
+-- Identifica en qué horas del día hay mayor actividad
+-- Ideal para capacity planning
+SELECT 
+    DATEPART(HOUR, capture_time) AS hora_del_dia,
+    AVG(num_sessions) AS promedio,
+    MAX(num_sessions) AS pico
+FROM SqlMant.dbo.sessions_alert3
+GROUP BY DATEPART(HOUR, capture_time)
+ORDER BY hora_del_dia;
+
+
+
+/* ***********************************************************************
+   4) SESIONES CON MAYOR CPU CONSUMIDA
+   *********************************************************************** */
+-- Top consumidores de CPU (sumatoria por captura)
+SELECT TOP 20
+    host_name,
+    program_name,
+    login_name,
+    DB,
+    cpu_time_ms,
+    capture_time
+FROM SqlMant.dbo.sessions_alert3
+ORDER BY cpu_time_ms DESC;
+
+
+
+/* ***********************************************************************
+   5) SESIONES CON MAYORES WAITS
+   *********************************************************************** */
+-- Muestra los waits más pesados asociados a sesiones
+-- Ideal para detectar problemas de performance
+SELECT TOP 20
+    host_name,
+    program_name,
+    login_name,
+    DB,
+    wait_type,
+    wait_time_ms,
+    capture_time
+FROM SqlMant.dbo.sessions_alert3
+WHERE wait_time_ms IS NOT NULL
+ORDER BY wait_time_ms DESC;
+
+
+
+/* ***********************************************************************
+   6) TOP CONSUMIDORES DE I/O (READS / WRITES / LOGICAL READS)
+   *********************************************************************** */
+
+-- 6A: TOP Logical Reads
+SELECT TOP 20
+    host_name,
+    program_name,
+    login_name,
+    DB,
+    logical_reads,
+    capture_time
+FROM SqlMant.dbo.sessions_alert3
+ORDER BY logical_reads DESC;
+
+-- 6B: TOP Reads (lecturas físicas)
+SELECT TOP 20
+    host_name,
+    program_name,
+    login_name,
+    DB,
+    reads,
+    capture_time
+FROM SqlMant.dbo.sessions_alert3
+ORDER BY reads DESC;
+
+-- 6C: TOP Writes
+SELECT TOP 20
+    host_name,
+    program_name,
+    login_name,
+    DB,
+    writes,
+    capture_time
+ORDER BY writes DESC;
+
+
+
+/* ***********************************************************************
+   7) DETECCIÓN DE ANOMALÍAS (Z-SCORE)
+   *********************************************************************** */
+-- Calcula la media y desviación estándar global de sesiones
+-- Luego calcula Z-score: cuántas desviaciones se aleja un valor del promedio
+-- Z >= 3 o Z <= -3 = anomalía estadística
+
+;WITH baseline AS (
+    SELECT 
+        capture_time,
+        num_sessions,
+        AVG(num_sessions) OVER() AS mean_ses,
+        STDEV(num_sessions) OVER() AS stdev_ses
+    FROM SqlMant.dbo.sessions_alert3
+)
+SELECT
+    capture_time,
+    num_sessions,
+    mean_ses,
+    stdev_ses,
+    (num_sessions - mean_ses) / NULLIF(stdev_ses,0) AS z_score
+FROM baseline
+ORDER BY capture_time DESC;
+
+
+
+/* ***********************************************************************
+   8) DETECCIÓN DE ANOMALÍAS REALES (Z >= 3)
+   *********************************************************************** */
+-- Picos anómalos reales
+;WITH baseline AS (
+    SELECT 
+        capture_time,
+        num_sessions,
+        AVG(num_sessions) OVER() AS mean_ses,
+        STDEV(num_sessions) OVER() AS stdev_ses
+    FROM SqlMant.dbo.sessions_alert3
+)
+SELECT
+    capture_time,
+    num_sessions,
+    mean_ses,
+    stdev_ses,
+    (num_sessions - mean_ses) / NULLIF(stdev_ses,0) AS z_score
+FROM baseline
+WHERE ABS((num_sessions - mean_ses) / NULLIF(stdev_ses,0)) >= 3
+ORDER BY capture_time DESC;
+
+/* ========================================================================
+   FIN DEL BLOQUE ANALÍTICO
+   ======================================================================== */
+   /* ========================================================================
+   FIN DEL BLOQUE ANALÍTICO
+   ======================================================================== */
+   /* ========================================================================
+   FIN DEL BLOQUE ANALÍTICO
+   ======================================================================== */
+   /* ========================================================================
+   FIN DEL BLOQUE ANALÍTICO
+   ======================================================================== */
+
+
+
+
+
+/* ================================================================
+   1) DROP TABLA MEJORADA SI EXISTE
+   ================================================================ */
+IF OBJECT_ID('SqlMant.dbo.sessions_alert3','U') IS NOT NULL
+    DROP TABLE SqlMant.dbo.sessions_alert3;
+
+/* ================================================================
+   2) CREAR TABLA sessions_alert3 (SIN COLUMNAS INVALIDAS)
+   ================================================================ */
+CREATE TABLE SqlMant.dbo.sessions_alert3 (
+    host_name            NVARCHAR(128) NULL,
+    program_name         NVARCHAR(256) NULL,
+    login_name           NVARCHAR(256) NULL,
+    DB                   VARCHAR(100)  NULL,
+    num_sessions         INT           NULL,
+    cpu_time_ms          BIGINT        NULL,
+    logical_reads        BIGINT        NULL,
+    reads                BIGINT        NULL,
+    writes               BIGINT        NULL,
+    wait_type            NVARCHAR(120) NULL,
+    wait_time_ms         BIGINT        NULL,
+    last_request_start   DATETIME      NULL,
+    capture_time         DATETIME      NULL
+);
+
+/* ================================================================
+   3) ÍNDICES
+   ================================================================ */
+CREATE INDEX IX_sessions_alert3_dims
+    ON SqlMant.dbo.sessions_alert3 (host_name, login_name, DB);
+
+CREATE INDEX IX_sessions_alert3_capture
+    ON SqlMant.dbo.sessions_alert3 (capture_time DESC);
+
+/* ================================================================
+   4) CREAR JOB EN UN SOLO BATCH
+   ================================================================ */
+USE msdb;
+
+BEGIN TRANSACTION;
+
+DECLARE @ReturnCode INT = 0;
+DECLARE @jobId BINARY(16);
+
+/* ---------------------------------------------------------------
+   ELIMINAR JOB SI YA EXISTE
+   --------------------------------------------------------------- */
+IF EXISTS (
+    SELECT 1 
+    FROM msdb.dbo.sysjobs 
+    WHERE name = N'DBA_Sessions_Monitoring3'
+)
+BEGIN
+    EXEC msdb.dbo.sp_delete_job 
+        @job_name = N'DBA_Sessions_Monitoring3',
+        @delete_unused_schedule = 1;
+END
+
+/* ---------------------------------------------------------------
+   Crear categoría si no existe
+   --------------------------------------------------------------- */
+IF NOT EXISTS (SELECT 1 FROM msdb.dbo.syscategories 
+    WHERE name = N'DBA' AND category_class = 1)
+BEGIN
+    EXEC @ReturnCode = msdb.dbo.sp_add_category 
+        @class = N'JOB',
+        @type  = N'LOCAL',
+        @name  = N'DBA';
+    IF @ReturnCode <> 0 GOTO QuitWithRollback;
+END
+
+/* ---------------------------------------------------------------
+   Crear Job
+   --------------------------------------------------------------- */
+EXEC @ReturnCode = msdb.dbo.sp_add_job
+        @job_name = N'DBA_Sessions_Monitoring3',
+        @enabled = 1,
+        @description = N'Monitoreo avanzado de sesiones',
+        @category_name = N'DBA',
+        @owner_login_name = N'sa',
+        @job_id = @jobId OUTPUT;
+
+IF @ReturnCode <> 0 GOTO QuitWithRollback;
+
+/* ---------------------------------------------------------------
+   STEP 1 – Inserción con waits (JOIN correcto con dm_exec_requests)
+   --------------------------------------------------------------- */
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep
+    @job_id = @jobId,
+    @step_name = N'Insert advanced session capture',
+    @step_id = 1,
+    @subsystem = N'TSQL',
+    @command = N'
+INSERT INTO SqlMant.dbo.sessions_alert3
+(host_name, program_name, login_name, DB,
+ num_sessions, cpu_time_ms, logical_reads, reads, writes,
+ wait_type, wait_time_ms, last_request_start, capture_time)
+SELECT
+    s.host_name,
+    s.program_name,
+    s.login_name,
+    DB_NAME(s.database_id) AS DB,
+
+    COUNT(DISTINCT s.session_id) AS num_sessions,
+
+    SUM(s.cpu_time)            AS cpu_time_ms,
+    SUM(s.logical_reads)       AS logical_reads,
+    SUM(s.reads)               AS reads,
+    SUM(s.writes)              AS writes,
+
+    MAX(r.wait_type)           AS wait_type,
+    SUM(r.wait_time)           AS wait_time_ms,
+    MAX(s.last_request_start_time) AS last_request_start,
+
+    GETDATE() AS capture_time
+FROM sys.dm_exec_sessions s
+LEFT JOIN sys.dm_exec_requests r 
+       ON r.session_id = s.session_id
+WHERE
+    s.is_user_process = 1
+    AND s.database_id > 4
+    AND s.program_name NOT LIKE ''%SQLAgent%''
+    AND s.program_name NOT LIKE ''%Management Studio%''
+    AND s.program_name NOT LIKE ''%Report%''
+    AND s.program_name NOT LIKE ''%.Net SqlClient%''
+GROUP BY
+    s.host_name, s.program_name, s.login_name, DB_NAME(s.database_id)
+HAVING 
+    COUNT(DISTINCT s.session_id) > 0;',
+    @database_name = N'master',
+    @on_success_action = 3,
+    @on_fail_action = 3;
+
+IF @ReturnCode <> 0 GOTO QuitWithRollback;
+
+/* ---------------------------------------------------------------
+   STEP 2 – Purga por lotes
+   --------------------------------------------------------------- */
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep
+    @job_id = @jobId,
+    @step_name = N'Purge 90 days (batch)',
+    @step_id = 2,
+    @subsystem = N'TSQL',
+    @command = N'
+WHILE 1 = 1
+BEGIN
+    DELETE TOP (5000)
+    FROM SqlMant.dbo.sessions_alert3
+    WHERE capture_time < DATEADD(day, -90, GETDATE());
+
+    IF @@ROWCOUNT < 5000 BREAK;
+END;',
+    @database_name = N'SqlMant',
+    @on_success_action = 1,
+    @on_fail_action = 2;
+
+IF @ReturnCode <> 0 GOTO QuitWithRollback;
+
+/* ---------------------------------------------------------------
+   Definir step inicial
+   --------------------------------------------------------------- */
+EXEC @ReturnCode = msdb.dbo.sp_update_job
+    @job_id = @jobId,
+    @start_step_id = 1;
+
+IF @ReturnCode <> 0 GOTO QuitWithRollback;
+
+/* ---------------------------------------------------------------
+   Schedule cada 2 minutos
+   --------------------------------------------------------------- */
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule
+    @job_id = @jobId,
+    @name = N'Session Monitoring Advanced',
+    @enabled = 1,
+    @freq_type = 4,
+    @freq_interval = 1,
+    @freq_subday_type = 4,
+    @freq_subday_interval = 2,
+    @active_start_date = 20221026,
+    @active_end_date = 99991231,
+    @active_start_time = 0,
+    @active_end_time = 235959;
+
+IF @ReturnCode <> 0 GOTO QuitWithRollback;
+
+/* ---------------------------------------------------------------
+   Asignar servidor
+   --------------------------------------------------------------- */
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver
+    @job_id = @jobId,
+    @server_name = N'(local)';
+
+IF @ReturnCode <> 0 GOTO QuitWithRollback;
+
+/* ---------------------------------------------------------------
+   FIN OK
+   --------------------------------------------------------------- */
+COMMIT TRANSACTION;
+GOTO EndSave;
+
+QuitWithRollback:
+IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+
+EndSave:
