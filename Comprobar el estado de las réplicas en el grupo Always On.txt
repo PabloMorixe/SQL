@@ -1,0 +1,181 @@
+DECLARE @Sincronizado BIT;
+
+-- Comprobar el estado de las réplicas en el grupo Always On
+IF EXISTS (
+    SELECT 1
+    FROM sys.dm_hadr_database_replica_states drs
+    INNER JOIN sys.availability_replicas ar 
+        ON drs.replica_id = ar.replica_id
+    INNER JOIN sys.availability_groups ag 
+        ON ar.group_id = ag.group_id
+    WHERE drs.synchronization_state_desc != 'SYNCHRONIZED'
+      OR drs.synchronization_health_desc != 'HEALTHY'
+)
+    SET @Sincronizado = 0;  -- False: Hay problemas de sincronización
+ELSE
+    SET @Sincronizado = 1;  -- True: Todo está sincronizado correctamente
+
+-- Mostrar el resultado
+SELECT 
+    CASE 
+        WHEN @Sincronizado = 1 THEN 'True' 
+        ELSE 'False' 
+    END AS Sincronizado;
+	
+	
+	
+	----aBAJO todo automatizado para envio por mail. 
+	
+	
+	USE SQLMANT;
+GO
+
+-- Crear o reemplazar el procedimiento almacenado
+create PROCEDURE Sp_Verificar_Sincronizacion_AlwaysOn
+AS
+BEGIN
+    DECLARE @Sincronizado BIT;
+    DECLARE @Mensaje NVARCHAR(MAX);
+    DECLARE @Asunto NVARCHAR(255);
+
+    -- Comprobar el estado de las réplicas en Always On
+    IF EXISTS (
+        SELECT 1
+        FROM sys.dm_hadr_database_replica_states drs
+        INNER JOIN sys.availability_replicas ar 
+            ON drs.replica_id = ar.replica_id
+        INNER JOIN sys.availability_groups ag 
+            ON ar.group_id = ag.group_id
+        WHERE drs.synchronization_state_desc != 'SYNCHRONIZED'
+          OR drs.synchronization_health_desc != 'HEALTHY'
+    )
+        SET @Sincronizado = 0;  -- False: Hay problemas de sincronización
+    ELSE
+        SET @Sincronizado = 1;  -- True: Todo está sincronizado correctamente
+
+    -- Si no está sincronizado, enviar un correo electrónico
+    IF @Sincronizado = 0
+    BEGIN
+        -- Configurar el mensaje de correo
+        SET @Mensaje = 'Se detectaron problemas de sincronización en Always On. Por favor, revisar las réplicas para asegurar la continuidad de los servicios.';
+
+        -- Configurar el asunto con el nombre del servidor
+        SET @Asunto = 'Alerta: Problemas de Sincronización en Always On - ' + @@servername;
+
+        -- Enviar correo mediante Database Mail
+        EXEC msdb.dbo.sp_send_dbmail
+            @profile_name = 'opesqladmin',  -- Reemplaza con tu perfil de correo de Database Mail
+            @recipients = 'ingenieriadedatos@supervielle.com.ar',  -- Cambia al correo destinatario
+            @copy_recipients = 'pablo.morixe@supervielle.com.ar',  -- Cambia al correo(s) en copia
+            @subject = @Asunto,  -- Asunto con el nombre del servidor
+            @body = @Mensaje;
+    END
+
+    -- Mostrar el resultado
+    SELECT 
+        CASE 
+            WHEN @Sincronizado = 1 THEN 'True' 
+            ELSE 'False' 
+        END AS Sincronizado;
+END;
+GO
+--execute Sp_Verificar_Sincronizacion_AlwaysOn
+go
+
+USE [msdb]
+GO
+
+/****** Object:  Job [DBA-Alert-SYNC-AON]    Script Date: 21/10/2024 20:42:35 ******/
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+/****** Object:  JobCategory [[Uncategorized (Local)]]    Script Date: 21/10/2024 20:42:35 ******/
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'[Uncategorized (Local)]' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'[Uncategorized (Local)]'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'DBA-Alert-SYNC-AON', 
+		@enabled=1, 
+		@notify_level_eventlog=0, 
+		@notify_level_email=0, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'No description available.', 
+		@category_name=N'[Uncategorized (Local)]', 
+		@owner_login_name=N'sa', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Validate node]    Script Date: 21/10/2024 20:42:36 ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Validate node', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=3, 
+		@on_success_step_id=0, 
+		@on_fail_action=3, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'--get_availability_group_role
+-- Detect if this instance''s role is a Primary Replica.
+-- If this instance''s role is NOT a Primary Replica stop the job so that it does not go on to the next job step
+DECLARE @rc int; 
+EXEC @rc = master.dbo.is_primary_node_of_SSlabveeamag;
+
+IF @rc = 0
+BEGIN;
+    DECLARE @name sysname;
+    SELECT  @name = (SELECT name FROM msdb.dbo.sysjobs WHERE job_id = CONVERT(uniqueidentifier, $(ESCAPE_NONE(JOBID))));
+    
+    EXEC msdb.dbo.sp_stop_job @job_name = @name;
+    PRINT ''Stopped the job since this is not a Primary Replica'';
+END;
+
+', 
+		@database_name=N'master', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Validar AON]    Script Date: 21/10/2024 20:42:36 ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Validar AON', 
+		@step_id=2, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'execute Sp_Verificar_Sincronizacion_AlwaysOn', 
+		@database_name=N'sqlmant', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 2
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'cada 2 mins', 
+		@enabled=1, 
+		@freq_type=4, 
+		@freq_interval=1, 
+		@freq_subday_type=4, 
+		@freq_subday_interval=2, 
+		@freq_relative_interval=0, 
+		@freq_recurrence_factor=0, 
+		@active_start_date=20241021, 
+		@active_end_date=99991231, 
+		@active_start_time=0, 
+		@active_end_time=235959, 
+		@schedule_uid=N'be1bf163-0c92-486b-b3fd-3017f80b78aa'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+GO
+

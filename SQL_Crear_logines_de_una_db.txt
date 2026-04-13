@@ -1,0 +1,37 @@
+DECLARE @DatabaseName NVARCHAR(100) = 'api_aprobaciones_operaciones' -- Nombre de la base de datos para la cual quieres generar los logins
+DECLARE @SQLQuery NVARCHAR(MAX)
+DECLARE @LoginName NVARCHAR(100)
+DECLARE @TypeDesc NVARCHAR(100)
+
+-- Construir la consulta dinámica para obtener los usuarios asociados a la base de datos especificada, excluyendo ciertos logines
+SET @SQLQuery = 'DECLARE cursorUsers CURSOR FOR
+                 SELECT name, type_desc
+                 FROM ' + QUOTENAME(@DatabaseName) + '.sys.database_principals
+                 WHERE type IN (''U'', ''S'', ''G'') AND 
+                       name NOT IN (''guest'',''dbo'', ''INFORMATION_SCHEMA'', ''sys'', ''GSCORP\GGARE_AdminGSI'', ''admin'')'
+
+EXEC sp_executesql @SQLQuery
+
+-- Abrir el cursor y obtener los resultados
+OPEN cursorUsers
+FETCH NEXT FROM cursorUsers INTO @LoginName, @TypeDesc
+
+-- Iterar a través de los usuarios y generar instrucciones CREATE LOGIN
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    -- Construir la instrucción CREATE LOGIN
+    SET @SQLQuery = 'CREATE LOGIN [' + @LoginName + '] '
+    IF @TypeDesc = 'WINDOWS_USER'
+        SET @SQLQuery = @SQLQuery + 'FROM WINDOWS'
+    ELSE
+        SET @SQLQuery = @SQLQuery + 'WITH PASSWORD = ''<IngreseSuContraseña>'', CHECK_POLICY = OFF'
+
+    -- Imprimir la instrucción CREATE LOGIN
+    PRINT @SQLQuery
+
+    FETCH NEXT FROM cursorUsers INTO @LoginName, @TypeDesc
+END
+
+-- Cerrar y desalojar el cursor
+CLOSE cursorUsers
+DEALLOCATE cursorUsers

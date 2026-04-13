@@ -1,0 +1,13 @@
+SELECT 
+    bs.database_name AS [Base de Datos],
+    MAX(bs.backup_finish_date) AS [Última Hora de Backup de Log]
+FROM 
+    msdb.dbo.backupset bs
+JOIN 
+    msdb.dbo.backupmediafamily bmf ON bs.media_set_id = bmf.media_set_id
+WHERE 
+    bs.type = 'L' -- 'L' indica backup de log
+GROUP BY 
+    bs.database_name
+ORDER BY 
+    [Última Hora de Backup de Log] DESC;

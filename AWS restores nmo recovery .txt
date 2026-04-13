@@ -1,0 +1,23 @@
+RESTORE DB FULL NORECOVERRY AND RESTORE DIFF AND LOG RECOVERY : 
+exec msdb.dbo.rds_restore_database                                                                               
+
+@restore_db_name='Mobile_fe_vida',                                                                        
+
+@s3_arn_to_restore_from='arn:aws:s3:::repo-rds-backup-prod/rds-backups/mobile_fe_vida_Diff_0*',
+
+@with_norecovery = 0,
+@type ='DIFFERENTIAL' 
+ 
+ exec msdb.dbo.rds_restore_log --RESTORE 
+  @restore_db_name='database_name',
+  @s3_arn_to_restore_from='arn:aws:s3:::bucket_name/log_file_name.extension',
+
+  [@with_norecovery=1],-- 1 = NOrecovery // 0 = recovery 
+  [@stopat='datetime'];--  sirve para restaurar hasta una hora determinada.
+
+ EXEC msdb.dbo.rds_task_status
+
+
+
+
+

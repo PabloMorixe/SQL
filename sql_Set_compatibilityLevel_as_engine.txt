@@ -1,0 +1,180 @@
+
+
+use sqlmant
+go
+
+
+IF OBJECT_ID('dbo.Sp_SET_COMPATIBILITY_LEVEL', 'P') IS NOT NULL
+BEGIN
+    DROP PROCEDURE dbo.Sp_SET_COMPATIBILITY_LEVEL;
+    PRINT 'Procedimiento almacenado Sp_SET_COMPATIBILITY_LEVEL eliminado.';
+END
+ELSE
+BEGIN
+    PRINT 'El procedimiento almacenado Sp_SET_COMPATIBILITY_LEVEL no existe.';
+END;
+
+go
+
+create PROCEDURE Sp_SET_COMPATIBILITY_LEVEL
+    @ExcludedDatabases NVARCHAR(MAX) = NULL -- Lista separada por comas con nombres de BD a excluir
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Determinar el nivel de compatibilidad adecuado según la versión del servidor
+    DECLARE @SQLVersion NVARCHAR(128) = CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128));
+    DECLARE @MajorVersion INT = CAST(LEFT(@SQLVersion, CHARINDEX('.', @SQLVersion) - 1) AS INT);
+    DECLARE @CompatibilityLevel INT;
+
+    -- Establecer el nivel de compatibilidad basado en la versión principal
+    IF @MajorVersion >= 16 -- SQL Server 2022
+        SET @CompatibilityLevel = 160;
+    ELSE IF @MajorVersion = 15 -- SQL Server 2019
+        SET @CompatibilityLevel = 150;
+    ELSE IF @MajorVersion = 14 -- SQL Server 2017
+        SET @CompatibilityLevel = 140;
+    ELSE IF @MajorVersion = 13 -- SQL Server 2016
+        SET @CompatibilityLevel = 130;
+    ELSE IF @MajorVersion = 12 -- SQL Server 2014
+        SET @CompatibilityLevel = 120;
+    ELSE IF @MajorVersion = 11 -- SQL Server 2012
+        SET @CompatibilityLevel = 110;
+    ELSE IF @MajorVersion = 10 -- SQL Server 2008
+        SET @CompatibilityLevel = 100;
+    ELSE IF @MajorVersion = 9 -- SQL Server 2005
+        SET @CompatibilityLevel = 90;
+    ELSE 
+        SET @CompatibilityLevel = 80; -- Nivel más bajo: SQL Server 2000
+
+    PRINT 'El nivel de compatibilidad adecuado para esta versión del motor es: ' + CAST(@CompatibilityLevel AS NVARCHAR(3));
+
+    -- Construir la lista de exclusiones si se proporcionó
+    DECLARE @Exclusions TABLE (DatabaseName NVARCHAR(128));
+    IF @ExcludedDatabases IS NOT NULL
+    BEGIN
+        INSERT INTO @Exclusions (DatabaseName)
+        SELECT TRIM(value) 
+        FROM STRING_SPLIT(@ExcludedDatabases, ',');
+    END
+
+    -- Cursor para recorrer solo las bases de datos con un nivel de compatibilidad diferente
+    DECLARE db_cursor CURSOR FOR
+    SELECT name 
+    FROM sys.databases 
+    WHERE state_desc = 'ONLINE' -- Solo bases de datos en línea
+    AND compatibility_level <> @CompatibilityLevel -- Solo bases con compatibilidad diferente
+    AND name NOT IN ('master', 'tempdb', 'model', 'msdb') -- Excluir bases del sistema
+    AND (NOT EXISTS (SELECT 1 FROM @Exclusions WHERE DatabaseName = sys.databases.name) OR @ExcludedDatabases IS NULL); -- Excluir las especificadas
+
+    -- Variables para almacenar el nombre de la base de datos
+    DECLARE @DatabaseName NVARCHAR(128);
+
+    -- Abrir el cursor
+    OPEN db_cursor;
+    FETCH NEXT FROM db_cursor INTO @DatabaseName;
+
+    -- Ciclo para recorrer las bases de datos con compatibilidad diferente
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        -- Cambiar el nivel de compatibilidad
+        DECLARE @SQL NVARCHAR(MAX);
+        SET @SQL = 'ALTER DATABASE [' + @DatabaseName + '] SET COMPATIBILITY_LEVEL = ' + CAST(@CompatibilityLevel AS NVARCHAR(3)) + ';';
+
+        EXEC sp_executesql @SQL;
+        PRINT 'El nivel de compatibilidad de la base de datos [' + @DatabaseName + '] ha sido cambiado a ' + CAST(@CompatibilityLevel AS NVARCHAR(3)) + '.';
+
+        -- Obtener la siguiente base de datos
+        FETCH NEXT FROM db_cursor INTO @DatabaseName;
+    END
+
+    -- Cerrar y liberar el cursor
+    CLOSE db_cursor;
+    DEALLOCATE db_cursor;
+END;
+
+go
+
+USE [msdb]
+GO
+
+
+IF EXISTS (SELECT 1 
+           FROM msdb.dbo.sysjobs 
+           WHERE name = 'DBA_SET_COMPATIBILITY_ALL_USER_DATABSES')
+BEGIN
+    EXEC msdb.dbo.sp_delete_job @job_name = 'DBA_SET_COMPATIBILITY_ALL_USER_DATABSES';
+    PRINT 'Job DBA_SET_COMPATIBILITY_ALL_USER_DATABASES eliminado.';
+END
+ELSE
+BEGIN
+    PRINT 'El job DBA_SET_COMPATIBILITY_ALL_USER_DATABASES no existe.';
+END;
+go
+
+/****** Object:  Job [DBA_SET_COMPATIBILITY_ALL_USER_DATABSES]    Script Date: 17/10/2024 16:58:16 ******/
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+/****** Object:  JobCategory [[Uncategorized (Local)]]    Script Date: 17/10/2024 16:58:17 ******/
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'[Uncategorized (Local)]' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'[Uncategorized (Local)]'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'DBA_SET_COMPATIBILITY_ALL_USER_DATABSES', 
+		@enabled=1, 
+		@notify_level_eventlog=0, 
+		@notify_level_email=0, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'No description available.', 
+		@category_name=N'[Uncategorized (Local)]', 
+		@owner_login_name=N'sa', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [SET COMPATIBILITY LEVEL]    Script Date: 17/10/2024 16:58:18 ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'SET COMPATIBILITY LEVEL', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'EXEC Sp_SET_COMPATIBILITY_LEVEL @ExcludedDatabases = ''sqlmant,distributor'';
+', 
+		@database_name=N'SqlMant', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'Daily 11am', 
+		@enabled=1, 
+		@freq_type=4, 
+		@freq_interval=1, 
+		@freq_subday_type=1, 
+		@freq_subday_interval=0, 
+		@freq_relative_interval=0, 
+		@freq_recurrence_factor=0, 
+		@active_start_date=20241017, 
+		@active_end_date=99991231, 
+		@active_start_time=110000, 
+		@active_end_time=235959, 
+		@schedule_uid=N'8c63cf3e-6832-4c9f-b356-45a43932ebf4'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+GO
+
+

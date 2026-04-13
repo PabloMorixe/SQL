@@ -1,0 +1,67 @@
+-- Parámetros
+DECLARE @RutaBackup NVARCHAR(1000) = '\\dqgdt-01\j\Backups\Morixe\' -- Ruta donde se guardará el backup
+DECLARE @BaseDeDatos NVARCHAR(500) = 'sqlmant' -- Nombre de la base de datos
+DECLARE @Correo1 NVARCHAR(1000) = 'pablo.morixe@supervielle.com.ar' -- Primer correo de destino (principal)
+DECLARE @Correo2 NVARCHAR(1000) = 'pablo.morixe@SUPERVIELLE.COM.AR' -- Segundo correo de destino (CC)
+DECLARE @ProfileName NVARCHAR(1000) = 'OPESQLADMIN' -- Nombre del perfil de correo
+
+-- Variables internas
+DECLARE @NombreArchivo NVARCHAR(255)
+DECLARE @HoraBackup NVARCHAR(50)
+DECLARE @MensajeCorreo NVARCHAR(MAX)
+DECLARE @AsuntoCorreo NVARCHAR(255)
+DECLARE @ErrorMsg NVARCHAR(4000)
+DECLARE @BackupName NVARCHAR(255) -- Variable para el nombre del backup
+
+-- Generación del nombre del archivo de backup
+SET @HoraBackup = CONVERT(NVARCHAR, GETDATE(), 120) -- Formato de fecha yyyy-mm-dd hh:mm:ss
+SET @NombreArchivo = @RutaBackup + @BaseDeDatos + '_' + REPLACE(CONVERT(NVARCHAR, GETDATE(), 112) + '_' + CONVERT(NVARCHAR, GETDATE(), 108), ':', '') + '.bak'
+
+-- Generación del nombre descriptivo del backup
+SET @BackupName = @BaseDeDatos + '-Full Database Backup'
+
+-- Asunto del correo
+SET @AsuntoCorreo = 'Notificación de Backup - ' + @BaseDeDatos
+
+-- Crear el backup
+BEGIN TRY
+    BACKUP DATABASE @BaseDeDatos 
+    TO DISK = @NombreArchivo
+    WITH COMPRESSION, COPY_ONLY, NOFORMAT, NOINIT, 
+         NAME = @BackupName,  -- Usando la variable para el nombre descriptivo
+         SKIP, NOREWIND, NOUNLOAD, STATS = 10
+
+    -- Mensaje de correo
+    SET @MensajeCorreo = 'El backup de la base de datos ' + @BaseDeDatos + 
+                         ' se ha realizado exitosamente.' + CHAR(13) + CHAR(10) +
+                         'Ruta del archivo de backup: ' + @NombreArchivo + CHAR(13) + CHAR(10) +
+                         'Hora de creación: ' + @HoraBackup
+
+    -- Enviar correo
+    EXEC msdb.dbo.sp_send_dbmail
+        @profile_name = @ProfileName,
+        @recipients = @Correo1,          -- Correo principal
+        @copy_recipients = @Correo2,     -- Copia (CC)
+        @subject = @AsuntoCorreo,
+        @body = @MensajeCorreo
+
+    PRINT 'Backup realizado y correo enviado con éxito.'
+
+END TRY
+BEGIN CATCH
+    SET @ErrorMsg = ERROR_MESSAGE()
+    PRINT 'Error al realizar el backup: ' + @ErrorMsg
+
+    -- Asunto de correo en caso de error
+    DECLARE @AsuntoCorreoError NVARCHAR(255) = 'Error en Backup - ' + @BaseDeDatos
+
+    -- Mensaje de error en el correo
+    SET @MensajeCorreo = 'Error al realizar el backup de la base de datos ' + @BaseDeDatos + 
+                         '. Detalles del error: ' + @ErrorMsg
+    EXEC msdb.dbo.sp_send_dbmail
+        @profile_name = @ProfileName,
+        @recipients = @Correo1,          -- Correo principal
+        @copy_recipients = @Correo2,     -- Copia (CC)
+        @subject = @AsuntoCorreoError,
+        @body = @MensajeCorreo
+END CATCH
