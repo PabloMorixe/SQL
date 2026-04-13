@@ -1,0 +1,22 @@
+SELECT a.fileid,
+       CONVERT(DECIMAL(12, 2), Round(a .size / 128.000, 2)) AS [FILESIZEINMB],
+       CONVERT(DECIMAL(12, 2), Round(Fileproperty (a. NAME, 'SpaceUsed') / 128.000, 2)) AS [SPACEUSEDINMB],
+       CONVERT(DECIMAL (12, 2), Round ((a. SIZE - Fileproperty (a. NAME, 'SpaceUsed')) / 128.000, 2)) AS [FREESPACEINMB],
+       a.NAME AS [DATABASENAME],
+       a.filename AS [FILENAME],
+       b .NAME
+FROM sys. sysfiles a
+LEFT OUTER JOIN sys. filegroups b ON a.groupid = b. data_space_id
+
+SELECT 
+    b.name AS [FILEGROUPNAME],
+    CONVERT(DECIMAL(12, 2), SUM(ROUND(a.size / 128.000, 2))) AS [TOTALFILESIZEINMB],
+    CONVERT(DECIMAL(12, 2), SUM(ROUND(FILEPROPERTY(a.name, 'SpaceUsed') / 128.000, 2))) AS [TOTALSPACEUSEDINMB],
+    CONVERT(DECIMAL(12, 2), SUM(ROUND((a.size - FILEPROPERTY(a.name, 'SpaceUsed')) / 128.000, 2))) AS [TOTALFREESPACEINMB],
+    CONVERT(DECIMAL(5, 2), ROUND((SUM(a.size - FILEPROPERTY(a.name, 'SpaceUsed')) * 100.0) / SUM(a.size), 2)) AS [FREEPERCENTAGE]
+FROM 
+    sys.sysfiles a
+LEFT OUTER JOIN 
+    sys.filegroups b ON a.groupid = b.data_space_id
+GROUP BY 
+    b.name;

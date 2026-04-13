@@ -1,0 +1,56 @@
+
+IF OBJECT_ID('tempdb..#TempFileInfo') IS NOT NULL
+    DROP TABLE #TempFileInfo;
+
+CREATE TABLE #TempFileInfo (
+    DBName NVARCHAR(128),
+    FileName NVARCHAR(128),
+    FileGroupName NVARCHAR(128), -- Nombre del Filegroup
+    SpaceUsedKB BIGINT,
+    FreeSpaceKB BIGINT,
+    FilePath NVARCHAR(260),
+    PercentFree DECIMAL(5, 2),
+    IsAutoGrowEnabled BIT,
+    GrowthUnit NVARCHAR(20), -- MB o %
+    FileType NVARCHAR(10), -- Extensión del archivo (.mdf, .ndf, .ldf)
+    FileDrive NVARCHAR(2) -- Unidad donde está almacenado (Ej: C:, D:)
+);
+
+DECLARE @cmd NVARCHAR(MAX);
+
+SET @cmd = '
+USE [?];
+INSERT INTO #TempFileInfo 
+SELECT 
+    DB_NAME() AS DBName,
+    mf.name AS FileName,
+    fg.name AS FileGroupName,
+    FILEPROPERTY(mf.name, ''SpaceUsed'') * 8 AS SpaceUsedKB,
+    (mf.size * 8) - (FILEPROPERTY(mf.name, ''SpaceUsed'') * 8) AS FreeSpaceKB,
+    mf.physical_name AS FilePath,
+    CAST((((mf.size * 8) - (FILEPROPERTY(mf.name, ''SpaceUsed'') * 8)) * 100.0 / NULLIF(mf.size * 8, 0)) AS DECIMAL(5, 2)) AS PercentFree,
+    CASE WHEN mf.growth = 0 THEN 0 ELSE 1 END AS IsAutoGrowEnabled,
+    CASE 
+        WHEN mf.growth = 0 THEN ''None''
+        WHEN mf.is_percent_growth = 1 THEN CAST(mf.growth AS NVARCHAR) + '' %''
+        ELSE CAST(mf.growth * 8 / 1024 AS NVARCHAR) + '' MB''
+    END AS GrowthUnit,
+    RIGHT(mf.physical_name, CHARINDEX(''.'', REVERSE(mf.physical_name))) AS FileType, -- Extraer la extensión
+    LEFT(mf.physical_name, 2) AS FileDrive -- Extraer la unidad (Ej: C:, D:)
+FROM 
+    sys.master_files mf
+    LEFT JOIN sys.filegroups fg ON mf.data_space_id = fg.data_space_id
+WHERE 
+    mf.database_id = DB_ID();'
+
+EXEC sp_MSforeachdb @cmd;
+
+-- Ver los datos insertados
+SELECT * FROM #TempFileInfo 
+where FileType <> 'ldf'
+and DBName not in ('master','model','tempdb','msdb')
+--order by FilePath
+--ORDER BY DBNAME,PERCENTFREE DESC
+--order by spaceusedkb,DBName
+--ORDER BY DBNAME,SpaceUsedKB DESC
+order by dbname, IsAutoGrowEnabled 

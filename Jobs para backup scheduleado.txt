@@ -1,0 +1,147 @@
+use SqlMant 
+
+go
+create PROCEDURE usp_BackupDatabases
+    @DatabaseNames NVARCHAR(MAX) -- Lista de nombres de BD separados por comas
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @DatabaseName NVARCHAR(256)
+    DECLARE @BackupPath NVARCHAR(500)
+    DECLARE @SQL NVARCHAR(MAX)
+    DECLARE @BasePath NVARCHAR(500) = '\\Ssbkppr-01\bkp\' -- Carpeta base del backup
+
+    -- Convertir la lista en una tabla
+    DECLARE @Databases TABLE (DatabaseName NVARCHAR(256))
+
+    INSERT INTO @Databases (DatabaseName)
+    SELECT TRIM(value) 
+    FROM STRING_SPLIT(@DatabaseNames, ',')
+
+    -- Recorrer cada base de datos
+    DECLARE db_cursor CURSOR FOR
+    SELECT DatabaseName FROM @Databases
+
+    OPEN db_cursor
+    FETCH NEXT FROM db_cursor INTO @DatabaseName
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        -- Construir ruta y el comando dinámico
+        SET @BackupPath = @BasePath + @DatabaseName + '.bak'
+
+        SET @SQL = '
+            BACKUP DATABASE [' + @DatabaseName + ']
+            TO DISK = N''' + @BackupPath + '''
+            WITH
+                NOFORMAT,
+				COPY_ONLY,
+                INIT,
+                NAME = N''' + @DatabaseName + '-Full Database Backup'',
+                SKIP,
+                NOREWIND,
+                NOUNLOAD,
+                COMPRESSION,
+                CHECKSUM,
+                STATS = 10,
+                BUFFERCOUNT = 2500,
+                BLOCKSIZE = 65536
+            '
+
+        -- Ejecutar el comando de backup
+        EXEC sp_executesql @SQL
+
+        FETCH NEXT FROM db_cursor INTO @DatabaseName
+    END
+
+    CLOSE db_cursor
+    DEALLOCATE db_cursor
+END
+GO
+
+
+USE [msdb]
+GO
+
+/****** Object:  Job [DatabaseBackup - A DEMANDA]    Script Date: 28/4/2025 18:40:44 ******/
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+/****** Object:  JobCategory [[Uncategorized (Local)]]    Script Date: 28/4/2025 18:40:44 ******/
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'[Uncategorized (Local)]' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'[Uncategorized (Local)]'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'DatabaseBackup - A DEMANDA', 
+		@enabled=0, 
+		@notify_level_eventlog=2, 
+		@notify_level_email=3, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'No description available.', 
+		@category_name=N'[Uncategorized (Local)]', 
+		@owner_login_name=N'sa', 
+		@notify_email_operator_name=N'opesqladmin', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Borra .bak]    Script Date: 28/4/2025 18:40:45 ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Borra .bak', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=3, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'CmdExec', 
+		@command=N'call \\Ssbkppr-01\bkp\BorraBAK.bat', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Backup databases]    Script Date: 28/4/2025 18:40:45 ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Backup databases', 
+		@step_id=2, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'---- Lista de nombres de BD separados por comas
+EXEC usp_BackupDatabases @DatabaseNames = ''sqlmant''
+', 
+		@database_name=N'SqlMant', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'Bkp', 
+		@enabled=1, 
+		@freq_type=4, 
+		@freq_interval=1, 
+		@freq_subday_type=1, 
+		@freq_subday_interval=0, 
+		@freq_relative_interval=0, 
+		@freq_recurrence_factor=0, 
+		@active_start_date=20221228, 
+		@active_end_date=99991231, 
+		@active_start_time=10000, 
+		@active_end_time=235959, 
+		@schedule_uid=N'444cc705-6f98-4b22-951f-48c708f29210'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+GO
+

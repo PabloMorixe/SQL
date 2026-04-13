@@ -1,0 +1,32 @@
+Te resumo lo que hace:
+
+Si el nodo es PRIMARY → imprime mensaje y deja seguir.
+
+Si el nodo pertenece a un AG pero no es primario → lanza un RAISERROR (y el Job se aborta en ese paso).
+
+Si la instancia no tiene AlwaysOn configurado → imprime mensaje y deja continuar.
+
+Te lo dejo con un pequeño ajuste recomendado: usar THROW en lugar de RAISERROR, porque en versiones nuevas de SQL Server es más consistente para cortar la ejecución:
+
+IF EXISTS (
+	SELECT 1
+	FROM sys.dm_hadr_availability_replica_states rs
+	JOIN sys.availability_replicas r ON rs.replica_id = r.replica_id
+	WHERE rs.role_desc = 'PRIMARY'
+	  AND r.replica_server_name = @@SERVERNAME
+)
+BEGIN
+	PRINT 'Este nodo es primario de AlwaysOn. Continuando ejecucion.';
+END
+ELSE IF EXISTS (
+	SELECT 1
+	FROM sys.dm_hadr_availability_replica_states
+)
+BEGIN
+	RAISERROR('Este nodo NO es primario del Availability Group. Se aborta la ejecucion.', 16, 1);
+END
+ELSE
+BEGIN
+	PRINT 'Este servidor no tiene AlwaysOn configurado. Continuando ejecucion.';
+END
+

@@ -1,0 +1,10 @@
+ejemplo
+ 
+Export: 
+bcp "SELECT cellphone, CellPhoneDate, cellphoneInformation, CellPhoneDateInformation FROM usersdata" queryout "C:\tmp\bcp\export_usersdata.txt" -S sspr17hbi-51 -d AR_Supervielle_Individuos_ICHB -U scriptexec -c
+
+ 
+import: 
+bcp SqlMant.dbo.pivot_PersonasCanal in "C:\Temp\bcp\export_usersdata.txt" -S app-rds-ss-dev-19-msv-03.cevmbxi1qnq1.us-east-1.rds.amazonaws.com -U scriptexec -c -e "C:\Temp\bcp\errores.log"
+ 
+todo desde el sspr17mon

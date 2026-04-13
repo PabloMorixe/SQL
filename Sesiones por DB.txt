@@ -1,0 +1,26 @@
+-- CANTIDAD DE SESIONES POR DB 
+
+select
+        db_name( database_id) as dbname
+        --,authenticating_database_id  
+        ,login_name
+        ,status
+        ,client_net_address
+        ,host_name  
+        ,program_name
+        ,count(*) as CountSessions  
+from
+        sys.dm_exec_connections as c
+join    sys.dm_exec_sessions as s on s.session_id = c.session_id
+where
+        s.session_id >50  and database_id > 4
+		and login_name not like 'PROD\%'
+--and       client_net_address = ''
+group BY
+        db_name( database_id)
+        --,authenticating_database_id  
+        ,login_name
+        ,status
+        ,client_net_address
+        ,host_name  
+        ,program_name

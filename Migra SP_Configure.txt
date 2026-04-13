@@ -1,0 +1,17 @@
+--MIGRA SP_CONFIGURE
+--pablo.morixe@gmail.com
+
+DECLARE @Configuraciones TABLE (
+    nombre NVARCHAR(128),
+    valor_actual SQL_VARIANT,
+    comando SQL_VARIANT
+);
+
+INSERT INTO @Configuraciones (nombre, valor_actual, comando)
+SELECT name, value_in_use, 
+    'EXEC sp_configure ''' + name + ''', ' + CAST(value_in_use AS NVARCHAR(50)) + '; RECONFIGURE;' 
+FROM sys.configurations
+WHERE value_in_use IS NOT NULL;
+
+SELECT comando AS ScriptConfiguracion
+FROM @Configuraciones;
