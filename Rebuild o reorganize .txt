@@ -1,0 +1,22 @@
+
+SELECT IND.[name] as [Indice],
+       DB_NAME(PS.[database_id]) as [Base],
+       SCH.[name] as [Esquema],
+       TAB.[name] as [Tabla],
+       PS.[avg_fragmentation_in_percent] as [Frag(%)],
+       'ALTER INDEX ' + IND.[name] + ' ON [' + SCH.[name] + '].[' + TAB.[name] + '] ' +
+        CASE WHEN PS.[avg_fragmentation_in_percent] > 30
+          THEN 'REBUILD'
+          ELSE 'REORGANIZE'
+        END as [QUERY]
+FROM SYS.DM_DB_INDEX_PHYSICAL_STATS (DB_ID(), NULL, NULL, NULL, NULL) PS
+INNER JOIN sys.indexes IND
+        ON PS.[object_id] = IND.[object_id]
+INNER JOIN sys.tables TAB
+        ON TAB.[object_id] = IND.[object_id]
+INNER JOIN sys.schemas SCH
+        ON SCH.[schema_id] = TAB.[schema_id]
+WHERE IND.NAME IS NOT NULL
+  AND PS.INDEX_ID = IND.INDEX_ID
+  AND PS.[avg_fragmentation_in_percent] > 10
+ORDER BY PS.[avg_fragmentation_in_percent] desc
