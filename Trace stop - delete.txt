@@ -1,0 +1,26 @@
+SELECT * FROM sys.fn_trace_getinfo(0) ;  
+GO  
+stop
+exec sp_trace_setstatus ID_TRAZA, 0
+delete
+exec sp_trace_setstatus 3, 2
+
+
+---------------------
+sp_trace_setstatus takes 2 parameters, trace id and status.
+
+The trace id is the id you find by doing a select * from sys.traces
+
+The status is either a 0, 1 or 2:
+
+0 stops the trace, 1 starts the trace, 2 closes the specified trace and deletes its definition from the server. (see MSDN image screenshot below)
+Let’s walk through the process.
+
+First, do a select * from sys.traces to get the trace ID. Second, stop the trace by executing sp_trace_setstatus trace_id, 0 then, close/delete the trace by executing sp_trace_setstatus trace_id, 2. (see below screenshot for example)
+
+SELECT * FROM sys.fn_trace_getinfo(0) ;  
+GO  
+stop
+exec sp_trace_setstatus ID_TRAZA, 0
+delete
+exec sp_trace_setstatus 3, 2

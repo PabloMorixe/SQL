@@ -1,0 +1,8 @@
+
+EXEC sp_change_users_login 'Auto_Fix', 'SOPORTE_VALKIMIA', NULL, '0xE2E653BDA0B9FF46A5F73784CE2DF4A9';
+
+EXEC sp_change_users_login 'Report'
+
+otra forma nueva by rodri tisera
+EXEC sp_change_users_login 'update_one','user','login'
+
