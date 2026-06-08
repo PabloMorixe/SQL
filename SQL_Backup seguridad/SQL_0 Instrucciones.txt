@@ -1,0 +1,21 @@
+ORDEN DE EJECUCION DE LOS SCRIPTS:
+
+RELEVAMIENTO / BACKUP DE SEGURIDAD:
+
+1) 1 Bkp Schemas.
+   Resguardar los dos grupos de queries generados.
+2) 2 Bkp DB Users.
+   Resguardar las queries generadas.
+3) 3 Bkp Roles.
+   Resguardar los dos grupos de queries generados.
+4) 4 Bkp securables
+   Resguardar las queries generadas.
+
+ESTRATEGIA DE RESTAURACION:
+
+1) Ejecutar los queries de creación de schemas, obtenidos por medio del script "1 Bkp Schemas"
+2) Ejecutar los queries de creación de Users, obtenidos por medio del script "2 Bkp DB Users"
+3) Ejecutar los queries de creación de Roles, obtenidos por medio del script "3 Bkp Roles"
+4) Ejecutar los queries de asignación de Users a Roles, obtenidos por medio del script "3 Bkp Roles"
+5) Ejecutar los queries de autorización de schemas, obtenidos por medio del script "1 Bkp Schemas"
+6) Ejecutar los queries de securables, obtenidos por medio del script "4 Bkp securables"

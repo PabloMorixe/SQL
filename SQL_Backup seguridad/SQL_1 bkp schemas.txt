@@ -1,0 +1,45 @@
+/*** CREA DOS LISTADOS DE QUERIES PARA REGENERAR LOS SCHEMAS ***/
+
+SET NOCOUNT ON;
+
+DECLARE @queries_creacion table ( [Linea] int IDENTITY(1,1) NOT NULL, [Query] nvarchar(200) NOT NULL )
+DECLARE @SCH_name         nvarchar(130)
+
+DECLARE cursor_schema CURSOR LOCAL FAST_FORWARD FOR
+SELECT SS.name
+FROM sys.schemas SS
+INNER JOIN sys.database_principals DP on DP.principal_id = SS.principal_id
+WHERE SS.[schema_id] > 4
+  AND DP.is_fixed_role = 0
+
+OPEN cursor_schema;
+FETCH NEXT FROM cursor_schema INTO @SCH_name;
+
+WHILE ( @@FETCH_STATUS = 0 )
+BEGIN
+
+  INSERT INTO @queries_creacion ( [Query] )
+  VALUES (N'CREATE SCHEMA ' + QUOTENAME(@SCH_name) + N' AUTHORIZATION [dbo];');
+  INSERT INTO @queries_creacion ( [Query] )
+  VALUES (N'GO');
+
+  FETCH NEXT FROM cursor_schema INTO @SCH_name;
+END
+
+CLOSE cursor_schema;
+DEALLOCATE cursor_schema;
+
+SELECT [Query] as [QUERIES DE CREACION]
+FROM @queries_creacion
+ORDER BY [Linea] ASC
+GO
+
+-----------------------------------------
+
+SELECT N'ALTER AUTHORIZATION ON SCHEMA:: ' + QUOTENAME(SS.[name]) + N' ' +
+       N'TO ' + QUOTENAME(DP.[name]) + N';' as [QUERY DE OWNERSHIP]
+FROM sys.schemas SS
+INNER JOIN sys.database_principals DP on DP.[principal_id] = SS.[principal_id]
+WHERE SS.[schema_id] > 4
+  AND DP.is_fixed_role = 0
+GO
