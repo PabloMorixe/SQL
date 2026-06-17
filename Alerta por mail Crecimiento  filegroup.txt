@@ -1,128 +1,367 @@
---Query envia mail de alerta por espacio en fileGroup. 
+USE [msdb];
+GO
 
-DECLARE
-@EmailSubject varchar(100),
-@TextTitle varchar(100),
-@SubTextTitle varchar(100),
-@TableHTML nvarchar(max),
-@Body nvarchar(max),
-@DBName varchar(50),
-@ServerName varchar(50),
-@texto1 varchar(100),
-@Alerta int  
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'DBA_Alerta_espacio_filegroupPM')
+BEGIN
+    EXEC msdb.dbo.sp_delete_job
+        @job_name = N'DBA_Alerta_espacio_filegroupPM',
+        @delete_unused_schedule = 1;   -- borra también el schedule asociado si queda huérfano
+    PRINT N'>> Job [DBA_Alerta_espacio_filegroupPM] eliminado.';
+END
+ELSE
+    PRINT N'>> El job [DBA_Alerta_espacio_filegroupPM] no existe. Nada que borrar.';
+GO
 
-Set @Alerta =  '10'
-select @ServerName = @@servername
-SET @DBName = ''
-SET @EmailSubject = 'Alerta espacio Filegroup en servidor ' + @ServerName + ' '
-SET @TextTitle = 'Alerta espacio Filegroup en servidor ' + @ServerName + ' '
-SET @SubTextTitle = 'Revisar los espacios disponibles en disco '
-set @texto1 = 'El umbral esta seteado en '+ CAST(@Alerta as varchar(100))+'%'
-SET @TableHTML =
-'<html>'+
-'<head><style>'+
--- Data cells styles / font size etc
-'td {border:1px solid #ddd;padding-left:5px;padding-right:5px;padding-top:1px;padding-bottom:1px;font-size:10pt}'+
-'</style></head>'+
-'<body>'+
--- TextTitle style
-'<div style="margin-top:15px; margin-left:15px; margin-bottom:15px; font-weight:bold; font-size:13pt; font-family:calibri;">' + @TextTitle +'</div>' +
--- SubTextTitle style
-'<div style="margin-top:15px; margin-left:15px; margin-bottom:15px; font-weight:bold; font-size:10pt; font-family:calibri;">' + @SubTextTitle +'</div>'  +
--- Umbral text style
-'<div style="margin-top:15px; margin-left:15px; margin-bottom:15px; font-weight:bold; font-size:10pt; font-family:calibri;">' + @texto1 +'</div>'  +
+/* ############################################################################################
+   #  DEPLOY  -  Alerta de espacio en Filegroups sin capacidad de crecer
+   #  Instala:  1) SQLMANT.dbo.usp_Alerta_Espacio_Filegroup
+   #            2) Job DBA_Alerta_espacio_filegroupPM (un step que invoca el SP)
+   #  Autor  :  Pablo Morixe
+   #
+   #  Prerrequisitos (deben existir en la instancia destino):
+   #    - Base SQLMANT.
+   #    - Database Mail habilitado, perfil 'opesqladmin' y operator 'opesqladmin'.
+   ############################################################################################ */
 
 
+/* ============================================================================================
+   SECCIÓN 1 -  Stored Procedure  SQLMANT.dbo.usp_Alerta_Espacio_Filegroup
+   --------------------------------------------------------------------------------------------
+   FRAGMENTO 1: valida rol AON (standalone o PRIMARY ejecuta; SECONDARY hace RETURN).
+   FRAGMENTO 2: releva espacio interno por FG + capacidad real de crecer (autogrowth + disco)
+                y alerta solo los FG con poco espacio interno que NO pueden crecer.
+   ============================================================================================ */
+USE [SQLMANT];
+GO
 
--- Color and columns names
-'<div style="font-family:Calibri; "><table>'+'<tr bgcolor=#00881d>'+
-'<td align=left><font face="calibri" color=White><b>Database Name</b></font></td>'+ -- Database Name
-'<td align=left><font face="calibri" color=White><b>Filegroup Name</b></font></td>'+ -- Filegroup Name
-'<td align=center><font face="calibri" color=White><b>Percent Free </b></font></td>'+ -- Percent Free 
-'<td align=right><font face="calibri" color=White><b>DisponibleGB</b></font></td>'+ -- DisponibleGB
-'</tr></div>'
+IF OBJECT_ID(N'dbo.usp_Alerta_Espacio_Filegroup', N'P') IS NULL
+    EXEC (N'CREATE PROCEDURE dbo.usp_Alerta_Espacio_Filegroup AS RETURN 0;');
+GO
+
+ALTER PROCEDURE dbo.usp_Alerta_Espacio_Filegroup
+    @Umbral          INT            = 4,                                       -- % libre interno mínimo del FG
+    @DiscoMinLibre   DECIMAL(5, 2)  = 10,                                      -- % libre mínimo de disco para "puede crecer"
+    @ProfileName     SYSNAME        = N'opesqladmin',
+    @Recipients      NVARCHAR(MAX)  = N'gestiondemonitoreoit@supervielle.com.ar',
+    @CopyRecipients  NVARCHAR(MAX)  = N'base.datos@supervielle.com.ar',
+    @Debug           BIT            = 0                                        -- 1 = muestra set y NO envía
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRY
+        /* ---------- FRAGMENTO 1: Validación de rol (AON / standalone) ---------- */
+        DECLARE @EsPrimaria BIT = 0;
+
+        IF EXISTS (SELECT 1 FROM sys.availability_groups)
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM sys.dm_hadr_availability_replica_states AS ars
+                JOIN sys.availability_replicas               AS ar
+                    ON ars.replica_id = ar.replica_id
+                WHERE ars.role_desc          = N'PRIMARY'
+                  AND ar.replica_server_name = @@SERVERNAME
+            )
+                SET @EsPrimaria = 1;
+        END
+        ELSE
+            SET @EsPrimaria = 1;   -- Standalone
+
+        IF @EsPrimaria = 0
+        BEGIN
+            PRINT N'Réplica secundaria: no corresponde ejecutar la alerta de espacio. Fin.';
+            RETURN 0;
+        END
+
+        /* ---------- FRAGMENTO 2.1: Relevamiento a NIVEL ARCHIVO ---------- */
+        IF OBJECT_ID(N'tempdb..#FileDetail') IS NOT NULL DROP TABLE #FileDetail;
+        CREATE TABLE #FileDetail (
+            dbname            SYSNAME,
+            FilegroupName     SYSNAME,
+            LogicalName       SYSNAME,
+            VolumeMountPoint  NVARCHAR(260),
+            SizePages         BIGINT,
+            SpaceUsedPages    BIGINT,
+            GrowthEnabled     BIT,
+            CanGrowFile       BIT,
+            VolPercentFree    DECIMAL(5, 2),
+            VolAvailGB        DECIMAL(10, 2)
+        );
+
+        DECLARE @dbname SYSNAME,
+                @sql    NVARCHAR(MAX);
+
+        DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
+            SELECT d.name
+            FROM sys.databases AS d
+            WHERE d.state_desc   = N'ONLINE'
+              AND d.is_read_only = 0
+              AND d.database_id  > 4
+              AND d.name NOT IN (N'sqlmant', N'rdsadmin');
+
+        OPEN db_cursor;
+        FETCH NEXT FROM db_cursor INTO @dbname;
+
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            SET @sql = N'
+                USE ' + QUOTENAME(@dbname) + N';
+                INSERT INTO #FileDetail
+                    (dbname, FilegroupName, LogicalName, VolumeMountPoint, SizePages,
+                     SpaceUsedPages, GrowthEnabled, CanGrowFile, VolPercentFree, VolAvailGB)
+                SELECT
+                    DB_NAME(),
+                    fg.name,
+                    df.name,
+                    vs.volume_mount_point,
+                    df.size,
+                    CAST(FILEPROPERTY(df.name, ''SpaceUsed'') AS BIGINT),
+                    CASE WHEN df.growth > 0 THEN 1 ELSE 0 END,
+                    CASE WHEN df.growth > 0
+                              AND (df.max_size = -1 OR df.size < df.max_size)
+                              AND (vs.available_bytes * 100.0 / NULLIF(vs.total_bytes, 0)) >= @DiscoMin
+                         THEN 1 ELSE 0 END,
+                    CAST(vs.available_bytes * 100.0 / NULLIF(vs.total_bytes, 0) AS DECIMAL(5,2)),
+                    CAST(vs.available_bytes / 1073741824.0 AS DECIMAL(10,2))
+                FROM sys.database_files AS df
+                JOIN sys.filegroups     AS fg ON df.data_space_id = fg.data_space_id
+                CROSS APPLY sys.dm_os_volume_stats(DB_ID(), df.file_id) AS vs
+                WHERE df.type  = 0
+                  AND df.state = 0;';
+
+            EXEC sys.sp_executesql
+                 @sql,
+                 N'@DiscoMin DECIMAL(5,2)',
+                 @DiscoMin = @DiscoMinLibre;
+
+            FETCH NEXT FROM db_cursor INTO @dbname;
+        END
+
+        CLOSE db_cursor;
+        DEALLOCATE db_cursor;
+
+        /* ---------- FRAGMENTO 2.2: Agregación a NIVEL FILEGROUP + "puede crecer" ---------- */
+        IF OBJECT_ID(N'tempdb..#PocoEspacio') IS NOT NULL DROP TABLE #PocoEspacio;
+        CREATE TABLE #PocoEspacio (
+            dbname        SYSNAME,
+            FilegroupName SYSNAME,
+            PercentFree   INT,
+            DisponibleGB  DECIMAL(10, 2),
+            Autogrowth    BIT,
+            CanGrow       BIT,
+            DiscoMinFree  DECIMAL(5, 2),
+            Discos        NVARCHAR(1000)
+        );
+
+        INSERT INTO #PocoEspacio
+            (dbname, FilegroupName, PercentFree, DisponibleGB, Autogrowth, CanGrow, DiscoMinFree, Discos)
+        SELECT
+            fd.dbname,
+            fd.FilegroupName,
+            CAST((1.0 - 1.0 * SUM(fd.SpaceUsedPages) / NULLIF(SUM(fd.SizePages), 0)) * 100 AS INT),
+            CAST((SUM(fd.SizePages) - SUM(fd.SpaceUsedPages)) / 131072.0 AS DECIMAL(10, 2)),
+            MAX(CAST(fd.GrowthEnabled AS INT)),
+            MAX(CAST(fd.CanGrowFile  AS INT)),
+            MIN(fd.VolPercentFree),
+            STUFF((SELECT DISTINCT N', ' + x.VolumeMountPoint
+                   FROM #FileDetail AS x
+                   WHERE x.dbname = fd.dbname
+                     AND x.FilegroupName = fd.FilegroupName
+                   FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'')
+        FROM #FileDetail AS fd
+        GROUP BY fd.dbname, fd.FilegroupName;
+
+        /* ---------- FRAGMENTO 2.3: Corte temprano ---------- */
+        IF NOT EXISTS (
+            SELECT 1 FROM #PocoEspacio
+            WHERE PercentFree < @Umbral
+              AND CanGrow = 0
+        )
+        BEGIN
+            PRINT N'No hay filegroups por debajo del umbral SIN capacidad de crecer. No se envía mail.';
+            RETURN 0;
+        END
+
+        /* ---------- FRAGMENTO 2.4: Modo Debug ---------- */
+        IF @Debug = 1
+        BEGIN
+            SELECT *,
+                   Motivo = CASE
+                                WHEN Autogrowth = 0 AND DiscoMinFree >= @DiscoMinLibre
+                                    THEN N'Sin autogrowth. Hay ' + CAST(DiscoMinFree AS NVARCHAR(10))
+                                         + N'% libre en disco: se recomienda HABILITAR autogrowth.'
+                                WHEN Autogrowth = 0 AND DiscoMinFree < @DiscoMinLibre
+                                    THEN N'Sin autogrowth y disco con poco espacio (' + CAST(DiscoMinFree AS NVARCHAR(10))
+                                         + N'% libre): ampliar disco o mover archivos.'
+                                ELSE N'Autogrowth ON sin margen: disco < ' + CAST(@DiscoMinLibre AS NVARCHAR(10))
+                                     + N'% libre o max_size alcanzado.'
+                            END
+            FROM #PocoEspacio
+            WHERE PercentFree < @Umbral
+              AND CanGrow = 0
+            ORDER BY PercentFree DESC;
+            RETURN 0;
+        END
+
+        /* ---------- FRAGMENTO 2.5: Armado del cuerpo HTML ---------- */
+        DECLARE @ServerName   SYSNAME = @@SERVERNAME,
+                @EmailSubject  NVARCHAR(200),
+                @TextTitle     NVARCHAR(200),
+                @SubTextTitle  NVARCHAR(300),
+                @texto1        NVARCHAR(200),
+                @TableHTML     NVARCHAR(MAX),
+                @Body          NVARCHAR(MAX);
+
+        SET @EmailSubject = N'Alerta espacio Filegroup en servidor ' + @ServerName + N' ';
+        SET @TextTitle    = N'Alerta espacio Filegroup en servidor ' + @ServerName + N' ';
+        SET @SubTextTitle = N'FG con menos de ' + CAST(@Umbral AS NVARCHAR(10))
+                          + N'% libre que NO pueden crecer (sin autogrowth, o disco con menos de '
+                          + CAST(@DiscoMinLibre AS NVARCHAR(10)) + N'% libre / max_size alcanzado).';
+        SET @texto1       = N'Umbral FG: ' + CAST(@Umbral AS NVARCHAR(10))
+                          + N'%  -  Mínimo disco: ' + CAST(@DiscoMinLibre AS NVARCHAR(10)) + N'%';
+
+        SET @TableHTML =
+            N'<html>' +
+            N'<head><style>' +
+            N'td {border:1px solid #ddd;padding-left:5px;padding-right:5px;padding-top:1px;padding-bottom:1px;font-size:10pt}' +
+            N'</style></head>' +
+            N'<body>' +
+            N'<div style="margin-top:15px; margin-left:15px; margin-bottom:15px; font-weight:bold; font-size:13pt; font-family:calibri;">' + @TextTitle    + N'</div>' +
+            N'<div style="margin-top:15px; margin-left:15px; margin-bottom:15px; font-weight:bold; font-size:10pt; font-family:calibri;">' + @SubTextTitle + N'</div>' +
+            N'<div style="margin-top:15px; margin-left:15px; margin-bottom:15px; font-weight:bold; font-size:10pt; font-family:calibri;">' + @texto1       + N'</div>' +
+            N'<div style="font-family:Calibri; "><table>' + N'<tr bgcolor=#00881d>' +
+            N'<td align=left><font face="calibri" color=White><b>Database Name</b></font></td>' +
+            N'<td align=left><font face="calibri" color=White><b>Filegroup Name</b></font></td>' +
+            N'<td align=center><font face="calibri" color=White><b>FG % Free</b></font></td>' +
+            N'<td align=right><font face="calibri" color=White><b>FG Disp.GB</b></font></td>' +
+            N'<td align=center><font face="calibri" color=White><b>Autogrowth</b></font></td>' +
+            N'<td align=left><font face="calibri" color=White><b>Disco(s)</b></font></td>' +
+            N'<td align=center><font face="calibri" color=White><b>Disco % Free</b></font></td>' +
+            N'<td align=left><font face="calibri" color=White><b>Motivo</b></font></td>' +
+            N'</tr>';
+
+        SET @Body = (
+            SELECT
+                td = dbname,
+                td = FilegroupName,
+                td = PercentFree,
+                td = DisponibleGB,
+                td = CASE WHEN Autogrowth = 1 THEN N'Sí' ELSE N'No' END,
+                td = Discos,
+                td = DiscoMinFree,
+                td = CASE
+                         WHEN Autogrowth = 0 AND DiscoMinFree >= @DiscoMinLibre
+                             THEN N'Sin autogrowth. Hay ' + CAST(DiscoMinFree AS NVARCHAR(10))
+                                  + N'% libre en disco: se recomienda HABILITAR autogrowth.'
+                         WHEN Autogrowth = 0 AND DiscoMinFree < @DiscoMinLibre
+                             THEN N'Sin autogrowth y disco con poco espacio (' + CAST(DiscoMinFree AS NVARCHAR(10))
+                                  + N'% libre): ampliar disco o mover archivos.'
+                         ELSE N'Autogrowth ON sin margen: disco < ' + CAST(@DiscoMinLibre AS NVARCHAR(10))
+                              + N'% libre o max_size alcanzado.'
+                     END
+            FROM #PocoEspacio
+            WHERE PercentFree < @Umbral
+              AND CanGrow = 0
+            ORDER BY PercentFree DESC
+            FOR XML RAW('tr'), ELEMENTS
+        );
+
+        SET @Body      = REPLACE(@Body, N'<td>', N'<td align=left><font face="calibri">');
+        SET @TableHTML = @TableHTML + @Body + N'</table></div></body></html>';
+        SET @TableHTML = N'<div style="color:Black; font-size:8pt; font-family:Calibri; width:auto;">' + @TableHTML + N'</div>';
+
+        /* ---------- FRAGMENTO 2.6: Envío del mail ---------- */
+        EXEC msdb.dbo.sp_send_dbmail
+            @profile_name    = @ProfileName,
+            @recipients      = @Recipients,
+            @copy_recipients = @CopyRecipients,
+            @body            = @TableHTML,
+            @subject         = @EmailSubject,
+            @body_format     = 'HTML';
+
+    END TRY
+    BEGIN CATCH
+        IF CURSOR_STATUS('local', N'db_cursor') >= -1
+        BEGIN
+            CLOSE db_cursor;
+            DEALLOCATE db_cursor;
+        END
+        ;THROW;
+    END CATCH
+END;
+GO
 
 
-if OBJECT_ID(N'tempdb..#PocoEspacio') IS NOT NULL 
-drop table #PocoEspacio
+/* ============================================================================================
+   SECCIÓN 2 -  Job  DBA_Alerta_espacio_filegroupPM
+   ============================================================================================ */
+USE [msdb]
+GO
 
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
 
-Create table #PocoEspacio(
-dbname varchar(50),
-FilegroupName varchar(50),
-PercentFree int,
-DisponibleGB decimal
-)
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'[Uncategorized (Local)]' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'[Uncategorized (Local)]'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
 
+END
 
---parseo 
-DECLARE @command nvarchar(4000)
-select @command = 'USE [?] 
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'DBA_Alerta_espacio_filegroupPM', 
+  @enabled=1, 
+  @notify_level_eventlog=2, 
+  @notify_level_email=2, 
+  @notify_level_netsend=0, 
+  @notify_level_page=0, 
+  @delete_level=0, 
+  @description=N'Pablo Morixe', 
+  @category_name=N'[Uncategorized (Local)]', 
+  @owner_login_name=N'sa', 
+  @notify_email_operator_name=N'opesqladmin', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
 
-insert into #PocoEspacio    
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'exec usp_Alerta_Espacio_Filegroup', 
+  @step_id=1, 
+  @cmdexec_success_code=0, 
+  @on_success_action=1, 
+  @on_success_step_id=0, 
+  @on_fail_action=2, 
+  @on_fail_step_id=0, 
+  @retry_attempts=0, 
+  @retry_interval=0, 
+  @os_run_priority=0, @subsystem=N'TSQL', 
+  @command=N'EXEC SQLMANT.dbo.usp_Alerta_Espacio_Filegroup', 
+  @database_name=N'master', 
+  @flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'cada hora', 
+  @enabled=1, 
+  @freq_type=4, 
+  @freq_interval=1, 
+  @freq_subday_type=8, 
+  @freq_subday_interval=1, 
+  @freq_relative_interval=0, 
+  @freq_recurrence_factor=0, 
+  @active_start_date=20260302, 
+  @active_end_date=99991231, 
+  @active_start_time=60000, 
+  @active_end_time=235959, 
+  @schedule_uid=N'70a51242-502c-4ccd-9776-90ed62368ca5'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+GO
 
-select 
-    dbname,
-    coalesce(f.name, ''TLog'') as FilegroupName,
-  --  Size/128000.0 as UsedSizeGb,
-  --  spaceused/128000.0 as SpaceUsedGb,
-    (1.0 - 1.0*spaceused/Size) * 100 as PercentFree,
-	(Size - spaceused)/128.00 as DisponibleGB 
-from   
-    (select  db_name() as dbname, 
-     groupid,      
-    sum(size) as Size, 
-    SUM(Fileproperty (NAME, ''SpaceUsed'')) as spaceused
-    from sys.sysfiles
-    group by groupid) e
-LEFT OUTER JOIN sys. filegroups f
-ON e.groupid = f. data_space_id
-'
---ejecucion
---print @command
-exec sp_MSforeachdb @command 
-
-/*
---filtro y alerta
-select *from #PocoEspacio 
-where PercentFree < 12
---and PercentFree < 16
-and dbname not in ('master','model','msdb','sqlmant')
-order by PercentFree desc
-
-*/
-
-SELECT @Body =(
-SELECT
-td = dbname,
-td = FilegroupName,
-td = PercentFree,
-td = DisponibleGB
-/*
-,td = inequality_columns,
-td = included_columns,
-td = CONVERT(DECIMAL(16,2),overal_impact_value)
-*/
-
-
-FROM #PocoEspacio
-where PercentFree < @Alerta and DisponibleGB < 10000
-and dbname not in ('master','model','msdb','sqlmant')
-ORDER BY PercentFree desc-- CONVERT(DECIMAL(16,2), overal_impact_value) desc
-for XML raw('tr'), elements)
-
-SET @body = REPLACE(@body, '<td>', '<td align=left><font face="calibri">')
-SET @tableHTML = @tableHTML + @body + '</table></div></body></html>'
-SET @tableHTML = '<div style="color:Black; font-size:8pt; font-family:Calibri; width:auto;">' + @tableHTML + '</div>'
-
-if (select count(*) FROM #PocoEspacio where PercentFree < @Alerta and dbname not in ('master','model','msdb','sqlmant') and DisponibleGB < 10000 ) > 0
-exec msdb.dbo.sp_send_dbmail
-@profile_name = 'opesqladmin',
-@recipients = 'base.datos@supervielle.com.ar; monitoreoTI@supervielle.com.ar',
---@Copy_recipients = 'COEData&AdvancedAnalytics@supervielle.com.ar',
---@Copy_recipients = 'MobileBanking@supervielle.com.ar',
---@recipients = 'pablo.morixe@supervielle.com.ar',
-@body = @tableHTML,
-@subject = @emailSubject,
-@body_format = 'HTML'
-
+ 
