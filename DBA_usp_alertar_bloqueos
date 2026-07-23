@@ -1,0 +1,499 @@
+USE msdb
+GO
+
+-- ==================== CREAR SCHEDULE SI NO EXISTE ====================
+IF NOT EXISTS (SELECT 1 FROM sysschedules WHERE name = 'Cada_10_Minutos_AlertasBloqueos')
+BEGIN
+    EXEC sp_add_schedule
+        @schedule_name = 'Cada_10_Minutos_AlertasBloqueos',
+        @freq_type = 4, -- Diariamente
+        @freq_interval = 1,
+        @freq_subday_type = 2, -- Minutos
+        @freq_subday_interval = 10, -- Cada 10 minutos (mínimo válido)
+        @active_start_time = 000000,
+        @active_end_time = 235959;
+    
+    PRINT '[✓] Schedule ''Cada_10_Minutos_AlertasBloqueos'' creado exitosamente.';
+END
+ELSE
+    PRINT '[ℹ] Schedule ''Cada_10_Minutos_AlertasBloqueos'' ya existe.';
+GO
+
+-- ==================== CREAR JOB SI NO EXISTE ====================
+IF NOT EXISTS (SELECT 1 FROM sysjobs WHERE name = 'DBA_usp_alertar_bloqueos')
+BEGIN
+    DECLARE @JobID UNIQUEIDENTIFIER;
+    
+    EXEC sp_add_job
+        @job_name = 'DBA_usp_alertar_bloqueos',
+        @enabled = 1,
+        @description = 'Ejecuta usp_alertar_bloqueos cada 5 minutos para detectar bloqueos y queries largas. Envía alertas por email.',
+        @job_id = @JobID OUTPUT;
+    
+    PRINT '[✓] Job ''DBA_usp_alertar_bloqueos'' creado exitosamente.';
+    
+    -- ==================== CREAR PASO DEL JOB ====================
+    EXEC sp_add_jobstep
+        @job_name = 'DBA_usp_alertar_bloqueos',
+        @step_name = 'Ejecutar_usp_alertar_bloqueos',
+        @subsystem = 'TSQL',
+        @database_name = 'sqlmant',
+        @command = N'EXEC sqlmant.dbo.usp_alertar_bloqueos;',
+        @retry_attempts = 1,
+        @retry_interval = 1,
+        @on_success_action = 1, -- Ir al siguiente paso
+        @on_fail_action = 2; -- Ir al siguiente paso en caso de error (no frenar)
+    
+    PRINT '[✓] Paso ''Ejecutar_usp_alertar_bloqueos'' creado exitosamente.';
+    
+    -- ==================== ASIGNAR SCHEDULE AL JOB ====================
+    EXEC sp_attach_schedule
+        @job_name = 'DBA_usp_alertar_bloqueos',
+        @schedule_name = 'Cada_10_Minutos_AlertasBloqueos';
+    
+    PRINT '[✓] Schedule asignado al job exitosamente.';
+    
+    -- ==================== ASIGNAR JOB AL SERVIDOR ====================
+    EXEC sp_add_jobserver
+        @job_name = 'DBA_usp_alertar_bloqueos',
+        @server_name = N'(local)';
+    
+    PRINT '[✓] Job asignado al servidor local exitosamente.';
+END
+ELSE
+    PRINT '[ℹ] Job ''DBA_usp_alertar_bloqueos'' ya existe. Verificando pasos...';
+    
+    -- Verificar si el paso existe
+    IF NOT EXISTS (SELECT 1 FROM sysjobsteps WHERE job_id = (SELECT job_id FROM sysjobs WHERE name = 'DBA_usp_alertar_bloqueos') AND step_name = 'Ejecutar_usp_alertar_bloqueos')
+    BEGIN
+        EXEC sp_add_jobstep
+            @job_name = 'DBA_usp_alertar_bloqueos',
+            @step_name = 'Ejecutar_usp_alertar_bloqueos',
+            @subsystem = 'TSQL',
+            @database_name = 'sqlmant',
+            @command = N'EXEC sqlmant.dbo.usp_alertar_bloqueos;',
+            @retry_attempts = 1,
+            @retry_interval = 1,
+            @on_success_action = 1,
+            @on_fail_action = 2;
+        
+        PRINT '[✓] Paso agregado al job existente.';
+    END
+    ELSE
+        PRINT '[ℹ] Paso ''Ejecutar_usp_alertar_bloqueos'' ya existe.';
+GO
+
+-- ==================== INFORMACIÓN DE USO ====================
+PRINT '';
+PRINT '============================================';
+PRINT '[✓] JOB DBA_usp_alertar_bloqueos listo';
+PRINT '============================================';
+PRINT '';
+PRINT 'INFORMACIÓN DEL JOB:';
+PRINT '  Nombre: DBA_usp_alertar_bloqueos';
+PRINT '  Frecuencia: Cada 10 minutos (24/7)';
+PRINT '  Pasos: 1 - Ejecutar TSQL';
+PRINT '  Database: sqlmant';
+PRINT '  Comando: EXEC sqlmant.dbo.usp_alertar_bloqueos;';
+PRINT '';
+PRINT 'PARA HABILITAR/DESHABILITAR EL JOB:';
+PRINT '   EXEC msdb.dbo.sp_update_job @job_name=''DBA_usp_alertar_bloqueos'', @enabled=1;  -- Habilitar';
+PRINT '   EXEC msdb.dbo.sp_update_job @job_name=''DBA_usp_alertar_bloqueos'', @enabled=0;  -- Deshabilitar';
+PRINT '';
+PRINT 'PARA EJECUTAR EL JOB MANUALMENTE:';
+PRINT '   EXEC msdb.dbo.sp_start_job @job_name=''DBA_usp_alertar_bloqueos'';';
+PRINT '';
+PRINT 'PARA VER HISTÓRICO DE EJECUCIONES:';
+PRINT '   SELECT TOP 50 h.* FROM msdb.dbo.sysjobhistory h';
+PRINT '   INNER JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id';
+PRINT '   WHERE j.name = ''DBA_usp_alertar_bloqueos''';
+PRINT '   ORDER BY h.run_date DESC, h.run_time DESC;';
+PRINT '';
+PRINT 'PARA VER EL ESTADO DEL ÚLTIMO PASO:';
+PRINT '   SELECT TOP 1 h.step_name, h.run_status, h.run_date, h.run_time, h.run_duration FROM msdb.dbo.sysjobhistory h';
+PRINT '   INNER JOIN msdb.dbo.sysjobs j ON h.job_id = j.job_id';
+PRINT '   WHERE j.name = ''DBA_usp_alertar_bloqueos''';
+PRINT '   ORDER BY h.run_date DESC, h.run_time DESC;';
+PRINT '';
+PRINT 'PARA CAMBIAR LA FRECUENCIA (ej: cada 15 minutos):';
+PRINT '   EXEC msdb.dbo.sp_update_schedule @name=''Cada_10_Minutos_AlertasBloqueos'', @freq_subday_interval=15;';
+PRINT '';
+PRINT 'PARA ELIMINAR EL JOB COMPLETAMENTE:';
+PRINT '   EXEC msdb.dbo.sp_delete_job @job_name=''DBA_usp_alertar_bloqueos'', @delete_unused_schedule=1;';
+PRINT '';
+
+USE sqlmant
+GO
+
+-- ==================== SP PRINCIPAL ÚNICO ====================
+CREATE OR ALTER PROCEDURE dbo.usp_alertar_bloqueos
+    @Destinatarios NVARCHAR(MAX) = 'pablo.morixe@supervielle.com.ar',
+    @MailProfile NVARCHAR(100) = 'opesqladmin',
+    @ExcluirLogins NVARCHAR(MAX) = 'NT AUTHORITY\SYSTEM,gscorp\pm43314adm',
+    @MinutosEntreAlertas INT = 30,
+    @DiasRetencionLog INT = 2, -- Limpiar registros más antiguos que esto
+    @LimpiarLog BIT = 1 -- 1 = ejecutar limpieza automática al inicio
+    --,@ExcluirComandos NVARCHAR(MAX) = '' -- FUTURO: 'BACKUP DATABASE,DBCC,RESTORE DATABASE,WAITFOR'
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    
+    -- ==================== CREAR TABLA DE CONTROL SI NO EXISTE ====================
+    IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'AlertasBloqueosLog' AND type = 'U')
+    BEGIN
+        CREATE TABLE dbo.AlertasBloqueosLog (
+            IDAlerta INT IDENTITY(1,1) PRIMARY KEY,
+            FechaAlerta DATETIME NOT NULL,
+            TipoProblema NVARCHAR(20) NOT NULL, -- 'BLOQUEO' o 'QUERY_LARGA'
+            SPIDProblema INT NOT NULL,
+            SPIDBloqueador INT NULL,
+            BaseDatos NVARCHAR(128),
+            EmailEnviado BIT DEFAULT 1,
+            Descripcion NVARCHAR(MAX)
+        );
+        
+        CREATE INDEX IX_AlertasBloqueosLog_Temporal 
+            ON dbo.AlertasBloqueosLog (TipoProblema, SPIDProblema, SPIDBloqueador, FechaAlerta DESC);
+        
+        PRINT '[✓] Tabla AlertasBloqueosLog creada exitosamente.';
+    END;
+    
+    BEGIN TRY
+        -- ==================== LIMPIEZA AUTOMÁTICA DEL LOG ====================
+        IF @LimpiarLog = 1
+        BEGIN
+            DELETE FROM dbo.AlertasBloqueosLog
+            WHERE FechaAlerta < DATEADD(DAY, -@DiasRetencionLog, GETDATE());
+            
+            IF @@ROWCOUNT > 0
+                PRINT '[✓] Limpieza automática: ' + CAST(@@ROWCOUNT AS NVARCHAR) + ' registros eliminados (> ' + CAST(@DiasRetencionLog AS NVARCHAR) + ' días).';
+        END;
+        
+        -- Tabla temporal para logins excluidos
+        DECLARE @LoginsExcluidos TABLE (LoginName NVARCHAR(128));
+        
+        -- Parsear logins desde string delimitado por comas
+        INSERT INTO @LoginsExcluidos
+        SELECT TRIM(value)
+        FROM STRING_SPLIT(@ExcluirLogins, ',')
+        WHERE TRIM(value) <> '';
+        
+        DECLARE @BloqueosPendientes TABLE (
+            SPIDBloqueador INT,
+            QueryBloqueadora NVARCHAR(MAX),
+            SPIDBloqueado INT,
+            TiempoMinutos INT,
+            BaseDatos NVARCHAR(128),
+            LoginName NVARCHAR(128),
+            HostName NVARCHAR(128),
+            CantidadBloqueados INT,
+            YaAlertado BIT -- Indicador si ya se alertó recientemente
+        );
+        
+        DECLARE @ConsultasLargas TABLE (
+            SPID INT,
+            Command NVARCHAR(32),
+            QueryText NVARCHAR(MAX),
+            BaseDatos NVARCHAR(128),
+            HorasTranscurridas INT,
+            LoginName NVARCHAR(128),
+            HostName NVARCHAR(128),
+            EsTruncada BIT,
+            YaAlertado BIT -- Indicador si ya se alertó recientemente
+        );
+        
+        DECLARE @HTMLBloqueos NVARCHAR(MAX);
+        DECLARE @HTMLConsultasLargas NVARCHAR(MAX);
+        DECLARE @EmailSubject NVARCHAR(255);
+        DECLARE @EmailBody NVARCHAR(MAX);
+        DECLARE @TieneProblemas BIT = 0;
+        DECLARE @ProblemasNuevos BIT = 0;
+        
+        -- ==================== DETECCIÓN: BLOQUEOS > 10 MIN ====================
+        INSERT INTO @BloqueosPendientes
+        SELECT 
+            r_bloq.session_id AS SPIDBloqueador,
+            qt_bloq.[text] AS QueryBloqueadora,
+            r_bloqu.session_id AS SPIDBloqueado,
+            DATEDIFF(MINUTE, r_bloqu.start_time, GETDATE()) AS TiempoMinutos,
+            DB_NAME(r_bloqu.database_id) AS BaseDatos,
+            s_bloqu.login_name AS LoginName,
+            s_bloqu.host_name AS HostName,
+            0 AS CantidadBloqueados,
+            CASE 
+                WHEN EXISTS (
+                    SELECT 1 FROM dbo.AlertasBloqueosLog al
+                    WHERE al.TipoProblema = 'BLOQUEO'
+                        AND al.SPIDBloqueador = r_bloq.session_id
+                        AND DATEDIFF(MINUTE, al.FechaAlerta, GETDATE()) < @MinutosEntreAlertas
+                ) THEN 1
+                ELSE 0
+            END AS YaAlertado
+        FROM sys.dm_exec_requests AS r_bloqu
+        INNER JOIN sys.dm_exec_sessions AS s_bloqu 
+            ON r_bloqu.session_id = s_bloqu.session_id
+        INNER JOIN sys.dm_exec_requests AS r_bloq 
+            ON r_bloqu.blocking_session_id = r_bloq.session_id
+        CROSS APPLY sys.dm_exec_sql_text(r_bloq.sql_handle) AS qt_bloq
+        WHERE r_bloqu.blocking_session_id > 0
+            AND DATEDIFF(MINUTE, r_bloqu.start_time, GETDATE()) > 10
+            AND s_bloqu.session_id > 50
+            AND s_bloqu.login_name NOT IN (SELECT LoginName FROM @LoginsExcluidos);
+        
+        -- ==================== DETECCIÓN: QUERIES > 4 HORAS ====================
+        INSERT INTO @ConsultasLargas
+        SELECT 
+            r.session_id AS SPID,
+            r.command AS Command,
+            qt.[text] AS QueryText,
+            DB_NAME(r.database_id) AS BaseDatos,
+            DATEDIFF(HOUR, r.start_time, GETDATE()) AS HorasTranscurridas,
+            s.login_name AS LoginName,
+            s.host_name AS HostName,
+            CASE WHEN LEN(qt.[text]) > 250 THEN 1 ELSE 0 END AS EsTruncada,
+            CASE 
+                WHEN EXISTS (
+                    SELECT 1 FROM dbo.AlertasBloqueosLog al
+                    WHERE al.TipoProblema = 'QUERY_LARGA'
+                        AND al.SPIDProblema = r.session_id
+                        AND DATEDIFF(MINUTE, al.FechaAlerta, GETDATE()) < @MinutosEntreAlertas
+                ) THEN 1
+                ELSE 0
+            END AS YaAlertado
+        FROM sys.dm_exec_requests AS r
+        INNER JOIN sys.dm_exec_sessions AS s 
+            ON r.session_id = s.session_id
+        CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) AS qt
+        WHERE DATEDIFF(HOUR, r.start_time, GETDATE()) > 4
+            AND r.session_id > 50
+            AND r.status NOT IN ('background', 'sleeping')
+            AND s.login_name NOT IN (SELECT LoginName FROM @LoginsExcluidos)
+            -- FUTURO: Descomentar cuando se implemente la etapa de exclusión de comandos
+            -- AND r.command NOT IN (
+            --     SELECT TRIM(value)
+            --     FROM STRING_SPLIT(@ExcluirComandos, ',')
+            --     WHERE TRIM(value) <> ''
+            -- )
+        ;
+        
+        -- ==================== VERIFICA SI HAY PROBLEMAS ====================
+        IF EXISTS (SELECT 1 FROM @BloqueosPendientes) OR EXISTS (SELECT 1 FROM @ConsultasLargas)
+            SET @TieneProblemas = 1;
+        
+        -- Verifica si hay PROBLEMAS NUEVOS (no alertados recientemente)
+        IF EXISTS (SELECT 1 FROM @BloqueosPendientes WHERE YaAlertado = 0)
+            OR EXISTS (SELECT 1 FROM @ConsultasLargas WHERE YaAlertado = 0)
+            SET @ProblemasNuevos = 1;
+        
+        -- ==================== CONSTRUCCIÓN HTML ====================
+        IF @TieneProblemas = 1
+        BEGIN
+            -- HTML para BLOQUEOS
+            IF EXISTS (SELECT 1 FROM @BloqueosPendientes)
+            BEGIN
+                -- Calcular cantidad de bloqueados por bloqueador
+                UPDATE b
+                SET CantidadBloqueados = (
+                    SELECT COUNT(DISTINCT SPIDBloqueado) 
+                    FROM @BloqueosPendientes b2 
+                    WHERE b2.SPIDBloqueador = b.SPIDBloqueador
+                )
+                FROM @BloqueosPendientes b;
+                
+                -- BLOQUEOS NUEVOS (para enviar en email)
+                SET @HTMLBloqueos = N'
+                <h3 style="color: #d9534f; font-family: Arial;">⚠⚠ BLOQUEOS DETECTADOS (> 10 minutos)</h3>
+                <table style="width:100%; border-collapse:collapse; font-family:Arial; font-size:12px;">
+                <tr style="background-color:#f5f5f5; border-bottom:2px solid #ddd;">
+                    <th style="padding:8px; text-align:left; border:1px solid #ddd;">Estado</th>
+                    <th style="padding:8px; text-align:left; border:1px solid #ddd;">SPID Bloqueador</th>
+                    <th style="padding:8px; text-align:left; border:1px solid #ddd;">Query Bloqueadora</th>
+                    <th style="padding:8px; text-align:left; border:1px solid #ddd;">SPID Bloqueado</th>
+                    <th style="padding:8px; text-align:left; border:1px solid #ddd;">Minutos</th>
+                    <th style="padding:8px; text-align:left; border:1px solid #ddd;">Sesiones Bloqueadas</th>
+                    <th style="padding:8px; text-align:left; border:1px solid #ddd;">Base</th>
+                    <th style="padding:8px; text-align:left; border:1px solid #ddd;">Usuario</th>
+                </tr>';
+                
+                SELECT @HTMLBloqueos += N'
+                <tr style="border-bottom:1px solid #ddd;' + CASE WHEN YaAlertado = 1 THEN 'background-color:#ffffcc;' ELSE '' END + N'">
+                    <td style="padding:8px; border:1px solid #ddd; text-align:center;"><strong>' 
+                        + CASE WHEN YaAlertado = 1 THEN '🔁 REPETIDO' ELSE '🆕 NUEVO' END + '</strong></td>
+                    <td style="padding:8px; border:1px solid #ddd;">' + CAST(SPIDBloqueador AS NVARCHAR) + '</td>
+                    <td style="padding:8px; border:1px solid #ddd; max-width:300px; word-break:break-all;">' 
+                        + LEFT(REPLACE(REPLACE(QueryBloqueadora, '<', '&lt;'), '>', '&gt;'), 250) + '</td>
+                    <td style="padding:8px; border:1px solid #ddd;">' + CAST(SPIDBloqueado AS NVARCHAR) + '</td>
+                    <td style="padding:8px; border:1px solid #ddd;">' + CAST(TiempoMinutos AS NVARCHAR) + '</td>
+                    <td style="padding:8px; border:1px solid #ddd; text-align:center;"><strong>' + CAST(CantidadBloqueados AS NVARCHAR) + '</strong></td>
+                    <td style="padding:8px; border:1px solid #ddd;">' + BaseDatos + '</td>
+                    <td style="padding:8px; border:1px solid #ddd;">' + ISNULL(LoginName, 'N/A') + '</td>
+                </tr>'
+                FROM @BloqueosPendientes
+                ORDER BY YaAlertado, TiempoMinutos DESC;
+                
+                SET @HTMLBloqueos += N'</table><p style="font-size:10px; color:#666;">🆕 NUEVO = Primera alerta o pasaron > ' 
+                    + CAST(@MinutosEntreAlertas AS NVARCHAR) + N' minutos. 🔁 REPETIDO = Problemático persistente.</p><br>';
+            END;
+            ELSE
+                SET @HTMLBloqueos = N'<p style="color: green; font-family: Arial;"><strong>✓ Sin bloqueos detectados</strong></p><br>';
+            
+            -- HTML para CONSULTAS LARGAS
+            IF EXISTS (SELECT 1 FROM @ConsultasLargas)
+            BEGIN
+                SET @HTMLConsultasLargas = N'
+                <h3 style="color: #f0ad4e; font-family: Arial;">⚠⚠ CONSULTAS LARGAS (> 4 horas)</h3>
+                <table style="width:100%; border-collapse:collapse; font-family:Arial; font-size:12px;">
+                <tr style="background-color:#f5f5f5; border-bottom:2px solid #ddd;">
+                    <th style="padding:8px; text-align:left; border:1px solid #ddd;">Estado</th>
+                    <th style="padding:8px; text-align:left; border:1px solid #ddd;">SPID</th>
+                    <th style="padding:8px; text-align:left; border:1px solid #ddd;">Comando</th>
+                    <th style="padding:8px; text-align:left; border:1px solid #ddd;">Query</th>
+                    <th style="padding:8px; text-align:left; border:1px solid #ddd;">Base</th>
+                    <th style="padding:8px; text-align:left; border:1px solid #ddd;">Horas</th>
+                    <th style="padding:8px; text-align:left; border:1px solid #ddd;">Usuario</th>
+                </tr>';
+                
+                SELECT @HTMLConsultasLargas += N'
+                <tr style="border-bottom:1px solid #ddd;' + CASE WHEN YaAlertado = 1 THEN 'background-color:#ffffcc;' ELSE '' END + N'">
+                    <td style="padding:8px; border:1px solid #ddd; text-align:center;"><strong>' 
+                        + CASE WHEN YaAlertado = 1 THEN '🔁 REPETIDO' ELSE '🆕 NUEVO' END + '</strong></td>
+                    <td style="padding:8px; border:1px solid #ddd;">' + CAST(SPID AS NVARCHAR) + '</td>
+                    <td style="padding:8px; border:1px solid #ddd;"><strong>' + ISNULL(Command, 'N/A') + '</strong></td>
+                    <td style="padding:8px; border:1px solid #ddd; max-width:300px; word-break:break-all;">' 
+                        + LEFT(REPLACE(REPLACE(QueryText, '<', '&lt;'), '>', '&gt;'), 250) 
+                        + CASE WHEN EsTruncada = 1 THEN N' <em style="color:#f0ad4e;">[TRUNCADA]</em>' ELSE '' END + '</td>
+                    <td style="padding:8px; border:1px solid #ddd;">' + BaseDatos + '</td>
+                    <td style="padding:8px; border:1px solid #ddd;">' + CAST(HorasTranscurridas AS NVARCHAR) + '</td>
+                    <td style="padding:8px; border:1px solid #ddd;">' + ISNULL(LoginName, 'N/A') + '</td>
+                </tr>'
+                FROM @ConsultasLargas
+                ORDER BY YaAlertado, HorasTranscurridas DESC;
+                
+                SET @HTMLConsultasLargas += N'</table><p style="font-size:10px; color:#666;">🆕 NUEVO = Primera alerta o pasaron > ' 
+                    + CAST(@MinutosEntreAlertas AS NVARCHAR) + N' minutos. 🔁 REPETIDO = Problemático persistente.</p><br>';
+            END;
+            ELSE
+                SET @HTMLConsultasLargas = N'<p style="color: green; font-family: Arial;"><strong>✓ Sin consultas largas detectadas</strong></p><br>';
+            
+            -- ==================== ENVÍO DE EMAIL SOLO SI HAY PROBLEMAS NUEVOS ====================
+            IF @ProblemasNuevos = 1
+            BEGIN
+                SET @EmailSubject = N'[ALERTA SQL] ⚠ NUEVOS PROBLEMAS DETECTADOS - ' + CONVERT(VARCHAR(19), GETDATE(), 121);
+                SET @EmailBody = N'
+                <html>
+                <head><style>
+                    body { font-family: Arial, sans-serif; }
+                    h2 { color: #333; border-bottom: 2px solid #666; padding-bottom: 10px; }
+                    .header { background-color: #f0f0f0; padding: 15px; margin-bottom: 20px; border-radius: 5px; }
+                    .info { background-color: #e8f4f8; padding: 10px; margin: 10px 0; border-left: 4px solid #0099cc; }
+                </style></head>
+                <body>
+                <div class="header">
+                    <h2>ALERTA DE PERFORMANCE - SQL SERVER</h2>
+                    <p><strong>Servidor:</strong> ' + @@SERVERNAME + N'</p>
+                    <p><strong>Fecha/Hora:</strong> ' + CONVERT(VARCHAR(19), GETDATE(), 121) + N'</p>
+                </div>
+                <div class="info">
+                    <strong>Nota:</strong> Se alertan TODOS los problemas, pero solo se envía email cuando hay problemas NUEVOS o no se ha alertado en ' 
+                    + CAST(@MinutosEntreAlertas AS NVARCHAR) + N' minutos.
+                </div>
+                ' + ISNULL(@HTMLBloqueos, '') + ISNULL(@HTMLConsultasLargas, '') + N'
+                <p style="color: #999; font-size: 10px; margin-top: 20px;">
+                    Email automático del sistema de monitoreo. No responder.
+                </p>
+                </body>
+                </html>';
+                
+                -- ==================== ENVÍO CON MANEJO DE ERRORES ====================
+                BEGIN TRY
+                    EXEC msdb.dbo.sp_send_dbmail
+                        @profile_name = @MailProfile,
+                        @recipients = @Destinatarios,
+                        @subject = @EmailSubject,
+                        @body = @EmailBody,
+                        @body_format = 'HTML';
+                    
+                    -- ==================== REGISTRAR ALERTAS EN LOG ====================
+                    -- Registrar bloqueos nuevos
+                    INSERT INTO dbo.AlertasBloqueosLog (FechaAlerta, TipoProblema, SPIDProblema, SPIDBloqueador, BaseDatos, Descripcion)
+                    SELECT 
+                        GETDATE(),
+                        'BLOQUEO',
+                        SPIDBloqueado,
+                        SPIDBloqueador,
+                        BaseDatos,
+                        'Bloqueo: SPID ' + CAST(SPIDBloqueador AS NVARCHAR) + ' bloquea a ' + CAST(SPIDBloqueado AS NVARCHAR) 
+                        + ' por ' + CAST(TiempoMinutos AS NVARCHAR) + ' minutos'
+                    FROM @BloqueosPendientes
+                    WHERE YaAlertado = 0;
+                    
+                    -- Registrar queries largas nuevas
+                    INSERT INTO dbo.AlertasBloqueosLog (FechaAlerta, TipoProblema, SPIDProblema, BaseDatos, Descripcion)
+                    SELECT 
+                        GETDATE(),
+                        'QUERY_LARGA',
+                        SPID,
+                        BaseDatos,
+                        'Query larga: SPID ' + CAST(SPID AS NVARCHAR) + ' (' + Command + ') corriendo ' 
+                        + CAST(HorasTranscurridas AS NVARCHAR) + ' horas'
+                    FROM @ConsultasLargas
+                    WHERE YaAlertado = 0;
+                    
+                    DECLARE @BloqueoNuevos INT = (SELECT COUNT(*) FROM @BloqueosPendientes WHERE YaAlertado = 0);
+                    DECLARE @QuerysNuevas INT = (SELECT COUNT(*) FROM @ConsultasLargas WHERE YaAlertado = 0);
+                    
+                    PRINT '[✓] Email enviado correctamente a: ' + @Destinatarios;
+                    PRINT '[✓] ' + CAST(@BloqueoNuevos + @QuerysNuevas AS NVARCHAR) + ' nuevas alertas registradas en log.';
+                END TRY
+                BEGIN CATCH
+                    PRINT '[✗] ERROR en envío de email: ' + ERROR_MESSAGE();
+                END CATCH;
+            END;
+            ELSE
+            BEGIN
+                PRINT '[ℹ] Problemas detectados pero ya fueron alertados en los últimos ' + CAST(@MinutosEntreAlertas AS NVARCHAR) + ' minutos. Email NO enviado.';
+                PRINT '[ℹ] Revisar tabla AlertasBloqueosLog para histórico de alertas.';
+            END;
+        END;
+        ELSE
+            PRINT '[✓] Sin alertas. Todo normal.';
+    
+    END TRY
+    BEGIN CATCH
+        PRINT '[✗] ERROR en usp_alertar_bloqueos: ' + ERROR_MESSAGE();
+        THROW;
+    END CATCH;
+END;
+GO
+
+-- ==================== INFORMACIÓN DE USO ====================
+PRINT '';
+PRINT '============================================';
+PRINT '[✓] SP usp_alertar_bloqueos creado exitosamente';
+PRINT '[✓] Tabla AlertasBloqueosLog disponible';
+PRINT '============================================';
+PRINT '';
+PRINT 'PARÁMETROS POR DEFECTO:';
+PRINT '  @Destinatarios = pablo.morixe@supervielle.com.ar';
+PRINT '  @MailProfile = opesqladmin';
+PRINT '  @ExcluirLogins = NT AUTHORITY\SYSTEM,gscorp\pm43314adm';
+PRINT '  @MinutosEntreAlertas = 30 min (evita spam)';
+PRINT '  @DiasRetencionLog = 30 días (limpieza automática)';
+PRINT '  @LimpiarLog = 1 (ejecutar limpieza al inicio)';
+PRINT '';
+PRINT 'PARA EJECUTAR MANUALMENTE (con defaults):';
+PRINT '   EXEC sqlmant.dbo.usp_alertar_bloqueos;';
+PRINT '';
+PRINT 'PARA EJECUTAR SIN LIMPIAR EL LOG:';
+PRINT '   EXEC sqlmant.dbo.usp_alertar_bloqueos @LimpiarLog = 0;';
+PRINT '';
+PRINT 'PARA CAMBIAR FRECUENCIA DE RE-ALERTAS (a 60 minutos):';
+PRINT '   EXEC sqlmant.dbo.usp_alertar_bloqueos @MinutosEntreAlertas = 60;';
+PRINT '';
+PRINT 'PARA VER HISTÓRICO DE ALERTAS:';
+PRINT '   SELECT TOP 100 * FROM sqlmant.dbo.AlertasBloqueosLog ORDER BY FechaAlerta DESC;';
+PRINT '';
+PRINT 'PARA VER RESUMEN POR TIPO:';
+PRINT '   SELECT TipoProblema, COUNT(*) as Total, MAX(FechaAlerta) as UltimaAlerta FROM sqlmant.dbo.AlertasBloqueosLog GROUP BY TipoProblema;';
+PRINT '';
